@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import typing as t
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from src.main import StavidBot
+if t.TYPE_CHECKING:
+    from src.main import StavidBot
 
 
 # This class includes all of the basic commands like help and quote
