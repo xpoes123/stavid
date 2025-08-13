@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+*.sqlite3
+
+# Byte-compiled / cache
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual env
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
