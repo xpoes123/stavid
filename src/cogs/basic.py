@@ -48,3 +48,6 @@ class Basic(commands.Cog):
             "```"
         )
         await interaction.response.send_message(message, ephemeral=True)
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Basic(bot))

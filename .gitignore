@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.env
+.env.local
 *.sqlite3
 
 # Byte-compiled / cache
