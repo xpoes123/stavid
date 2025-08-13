@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from src.basic import Basic
+from basic import Basic
 
 TEST_GUILD_ID = 1401585357799292958
 
