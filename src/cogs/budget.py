@@ -173,6 +173,32 @@ class Budget(commands.Cog):
             ),
         ]
 
+    # TODO - Implement this
+    @app_commands.command(
+        name="rent", description="Run once a month to add rent payment"
+    )
+    async def rent(self, interaction: discord.Interaction):
+        partner = await _resolve_partner(interaction)
+        async with self.bot.db() as s:
+            net_cents = await _net_between(s, partner.id, interaction)
+        await interaction.response.send_message(
+            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
+            ephemeral=True,
+        )
+
+    # TODO - Implement this
+    @app_commands.command(
+        name="ledger", description="See the itemized ledger for this month"
+    )
+    async def leder(self, interaction: discord.Interaction):
+        partner = await _resolve_partner(interaction)
+        async with self.bot.db() as s:
+            net_cents = await _net_between(s, partner.id, interaction)
+        await interaction.response.send_message(
+            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
+            ephemeral=True,
+        )
+
 
 async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> int:
     guild_id = interaction.guild_id
