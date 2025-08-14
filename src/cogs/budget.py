@@ -36,10 +36,50 @@ async def _resolve_partner(interaction: discord.Interaction) -> discord.Member |
             return m
 
 
+def _format_money(cents: int) -> str:
+    """Helper to format cents into a nice $xx.xx string."""
+    return f"${Decimal(cents) / Decimal(100):,.2f}"
+
+
+def _format_net_message(net_cents: int) -> str:
+    """Return a pretty message describing the net balance."""
+    net_abs = abs(net_cents)
+    if net_cents > 0:
+        return f"💰 You’re owed **{_format_money(net_abs)}**"
+    elif net_cents < 0:
+        return f"💸 You owe **{_format_money(net_abs)}**"
+    else:
+        return "✅ All square"
+
+
 # This class includes all of the basic commands like help and quote
 class Budget(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
+
+    async def _create_ledger_entry(
+        self, interaction: discord.Interaction, cents: int, note: str
+    ) -> int:
+        partner = await _resolve_partner(interaction)
+        if not partner:
+            return await interaction.response.send_message(
+                "❌ I couldn’t infer who to request from (set `PARTNER_IDS`).",
+                ephemeral=True,
+            )
+        async with self.bot.db() as s:
+            s.add(
+                LedgerEntry(
+                    guild_id=interaction.guild_id or 0,
+                    creditor_id=interaction.user.id,
+                    debtor_id=partner.id,
+                    amount_cents=cents,
+                    note=note,
+                )
+            )
+            await s.commit()
+
+            net = await _net_between(s, partner.id, interaction)
+        return net
 
     @app_commands.command(
         name="venmo",
@@ -54,53 +94,89 @@ class Budget(commands.Cog):
         interaction: discord.Interaction,
         amount: app_commands.Range[float, 0.01, 10000.0],
         note: str,
-        month: str | None = None,
     ) -> None:
-        partner = await _resolve_partner(interaction)
-        if not partner:
-            return await interaction.response.send_message(
-                "❌ I couldn’t infer who to request from (set `PARTNER_IDS`).",
-                ephemeral=True,
-            )
         cents = int(
             Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100
         )
-
-        async with self.bot.db() as s:
-            s.add(
-                LedgerEntry(
-                    guild_id=interaction.guild_id or 0,
-                    creditor_id=interaction.user.id,
-                    debtor_id=partner.id,
-                    amount_cents=cents,
-                    note=note,
-                )
-            )
-            await s.commit()
-
-            net = await _net_between(
-                s, interaction.guild_id or 0, interaction.user.id, partner.id
-            )
-        dollars = Decimal(net) / Decimal(100)
-        sign = "you’re owed" if net > 0 else ("you owe" if net < 0 else "square")
+        net_cents = await self._create_ledger_entry(
+            interaction=interaction, cents=cents, note=note
+        )
+        partner = await _resolve_partner(interaction)
         await interaction.response.send_message(
-            f"🧾 Logged **${Decimal(cents) / Decimal(100)}** from {partner.mention} for **{note}**.\n"
-            f"Current net: **{abs(dollars)}** ({sign}).",
+            (
+                f"🧾 **Ledger Entry Created**\n"
+                f"**From:** {partner.mention}\n"
+                f"**Amount:** {_format_money(cents)}\n"
+                f"**Note:** {note}\n\n"
+                f"{_format_net_message(net_cents)}"
+            ),
+            ephemeral=False,
         )
 
-    # TODO - Implement this
     @app_commands.command(name="balance", description="Check the balance")
     async def balance(self, interaction: discord.Interaction):
-        await interaction.response.send_message("Check balance", ephemeral=True)
+        partner = await _resolve_partner(interaction)
+        async with self.bot.db() as s:
+            net_cents = await _net_between(s, partner.id, interaction)
+        await interaction.response.send_message(
+            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
+            ephemeral=True,
+        )
 
-    # TODO - Implement this
+    @app_commands.command(
+        name="pay",
+        description="Select an amount that you have paid the opposing person",
+    )
+    @app_commands.describe(amount="Amount", note="Note")
+    async def pay(
+        self,
+        interaction: discord.Interaction,
+        amount: float,
+        note: str = "Payment made",
+    ):
+        cents = int(
+            Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100
+        )
+        net_cents = await self._create_ledger_entry(
+            interaction=interaction, cents=cents, note=note
+        )
+        await interaction.response.send_message(
+            (
+                f"💵 **Payment Recorded**\n"
+                f"**Payer:** {interaction.user.mention}\n"
+                f"**Amount:** {_format_money(cents)}\n"
+                f"**Note:** {note}\n\n"
+                f"{_format_net_message(net_cents)}"
+            ),
+            ephemeral=False,
+        )
 
-    @app_commands.command(name="reset", description="Reset the current month's ledger")
-    async def reset(self, interaction: discord.Interaction):
-        await interaction.response.send_message("Reset database", ephemeral=True)
+    @pay.autocomplete("amount")
+    async def amount_autocomplete(self, interaction: discord.Interaction, current: str):
+        partner = await _resolve_partner(interaction)
+        if not partner:
+            return [app_commands.Choice(name="Set PARTNER_IDS first", value=0.0)]
+
+        async with self.bot.db() as s:
+            net_cents = await _net_between(s, partner.id, interaction)
+
+        label_sign = (
+            "they owe you"
+            if net_cents < 0
+            else ("you owe them" if net_cents > 0 else "zip")
+        )
+        suggested_amount = abs(Decimal(net_cents) / Decimal(100))
+        return [
+            app_commands.Choice(
+                name=f"${suggested_amount:.2f} ({label_sign})",
+                value=float(suggested_amount),
+            ),
+        ]
 
 
-async def _net_between(s, guild_id: int, me_id: int, partner_id: int) -> int:
+async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> int:
+    guild_id = interaction.guild_id
+    me_id = interaction.user.id
     expr = case(
         (
             (LedgerEntry.settled.is_(False))
