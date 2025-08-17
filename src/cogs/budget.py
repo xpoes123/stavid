@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import os
 import typing as t
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -11,34 +10,12 @@ from discord.ext import commands
 from sqlalchemy import case, func, select
 
 from src.db import LedgerEntry
+from src.utils import DAVID_ID, STEPH_ID, resolve_partner
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
 
-DAVID_ID = 240608458888445953
-STEPH_ID = 694650702466908160
 MONTHLY_RENT = 230000
-
-
-async def _resolve_partner(interaction: discord.Interaction) -> discord.Member | None:
-    me_id = interaction.user.id
-    guild = interaction.guild
-    if guild is None:
-        return None
-
-    partner_ids = {
-        int(x) for x in os.getenv("PARTNER_IDS", "").split(",") if x.strip().isdigit()
-    }
-    other_id = next((uid for uid in partner_ids if uid != me_id), None)
-    if other_id:
-        m = guild.get_member(other_id)
-        if m is None:
-            try:
-                m = await guild.fetch_member(other_id)
-            except discord.NotFound:
-                m = None
-        if m and not m.bot:
-            return m
 
 
 def _format_money(cents: int) -> str:
@@ -68,7 +45,7 @@ class Budget(commands.Cog):
         cents: int,
         note: str,
     ) -> int:
-        partner = await _resolve_partner(interaction)
+        partner = await resolve_partner(interaction)
         if not partner:
             return await interaction.response.send_message(
                 "❌ I couldn’t infer who to request from (set `PARTNER_IDS`).",
@@ -109,7 +86,7 @@ class Budget(commands.Cog):
         net_cents = await self._create_ledger_entry(
             interaction=interaction, cents=cents, note=note
         )
-        partner = await _resolve_partner(interaction)
+        partner = await resolve_partner(interaction)
         await interaction.response.send_message(
             (
                 f"🧾 **Ledger Entry Created**\n"
@@ -151,7 +128,7 @@ class Budget(commands.Cog):
 
     @pay.autocomplete("amount")
     async def amount_autocomplete(self, interaction: discord.Interaction, current: str):
-        partner = await _resolve_partner(interaction)
+        partner = await resolve_partner(interaction)
         if not partner:
             return [app_commands.Choice(name="Set PARTNER_IDS first", value=0.0)]
 
@@ -175,25 +152,37 @@ class Budget(commands.Cog):
         name="rent", description="Run once a month to add rent payment"
     )
     async def rent(self, interaction: discord.Interaction):
-        partner = await _resolve_partner(interaction)
+        partner = await resolve_partner(interaction)
         if interaction.user.id == DAVID_ID:
             net_cents = await self._create_ledger_entry(
-                interaction, MONTHLY_RENT / 300, "rent"
+                interaction, MONTHLY_RENT / 3, "rent"
             )
         if interaction.user.id == STEPH_ID:
             net_cents = await self._create_ledger_entry(
-                interaction, -MONTHLY_RENT / 300, "rent"
+                interaction, -MONTHLY_RENT / 3, "rent"
             )
         await interaction.response.send_message(
             f"📊 **Current Balance after rent {partner.mention}:**\n{_format_net_message(net_cents)}",
-            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="wifi_bill", description="Run once a month to add wifi payment"
+    )
+    async def wifi_bill(self, interaction: discord.Interaction):
+        partner = await resolve_partner(interaction)
+        if interaction.user.id == DAVID_ID:
+            net_cents = await self._create_ledger_entry(interaction, 8000 / 3, "wifi")
+        if interaction.user.id == STEPH_ID:
+            net_cents = await self._create_ledger_entry(interaction, -8000 / 3, "wifi")
+        await interaction.response.send_message(
+            f"📊 **Current Balance after wifi {partner.mention}:**\n{_format_net_message(net_cents)}",
         )
 
     @app_commands.command(
         name="ledger", description="See the itemized ledger for this month"
     )
     async def leder(self, interaction: discord.Interaction):
-        partner = await _resolve_partner(interaction)
+        partner = await resolve_partner(interaction)
         async with self.bot.db() as s:
             net_cents = await _net_between(s, partner.id, interaction)
             entries: list[LedgerEntry] = await _get_ledger_itemized(

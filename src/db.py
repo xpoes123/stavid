@@ -8,7 +8,7 @@ from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
-from sqlalchemy import BigInteger, DateTime, Integer, Text
+from sqlalchemy import BigInteger, DateTime, Integer, Text, Boolean
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -102,6 +102,23 @@ class LedgerEntry(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class ReminderEntry(Base):
+    __tablename__ = "reminder_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    creator_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    partner_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    location: Mapped[str] = mapped_column(Text, default="", nullable=True)
+    done: Mapped[Boolean] = mapped_column(Text, default=False, nullable=False)
 
 
 async def init_db(sessionmaker: async_sessionmaker) -> None:

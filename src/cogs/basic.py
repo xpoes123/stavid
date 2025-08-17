@@ -13,6 +13,8 @@ if t.TYPE_CHECKING:
 
 # ---------- Static help page content ----------
 
+# ---------- Static help page content ----------
+
 
 def basic_help_embed() -> discord.Embed:
     e = discord.Embed(
@@ -22,7 +24,7 @@ def basic_help_embed() -> discord.Embed:
     )
     e.add_field(
         name="/wifi",
-        value="📶 Get the guest Wi‑Fi network name and password.",
+        value="📶 Get the guest Wi-Fi network name and password.",
         inline=False,
     )
     e.set_footer(text="Use the buttons below to switch pages.")
@@ -36,18 +38,36 @@ def budget_help_embed() -> discord.Embed:
         color=discord.Color.blurple(),
     )
     e.add_field(
-        name="/venmo",
-        value="Log an expense owed by your partner. Example: `/venmo amount: 23.50 note: Dinner`",
+        name="/venmo amount:<number> note:<text>",
+        value="Create a ledger entry that your partner owes you. Example: `/venmo amount: 23.50 note: Dinner`",
         inline=False,
     )
     e.add_field(
-        name="/pay",
-        value="Record a payment you made. Example: `/pay amount: 50 note: Rent share`",
+        name="/pay amount:<number> [note:<text>]",
+        value=(
+            "Record a payment **you** made. Amount has autocomplete to suggest the exact net.\n"
+            "Example: `/pay amount: 50 note: Rent share`"
+        ),
         inline=False,
     )
     e.add_field(
-        name="/balance",
-        value="Check the current net balance between you and your partner.",
+        name="/rent",
+        value="Post the monthly rent split (±MONTHLY_RENT/3 depending on who runs it) and show the new balance.",
+        inline=False,
+    )
+    e.add_field(
+        name="/wifi_bill",
+        value="Post the monthly Wi-Fi split (±8000/3) and show the new balance.",
+        inline=False,
+    )
+    e.add_field(
+        name="/ledger",
+        value="Show an itemized list of this month’s entries and the current net.",
+        inline=False,
+    )
+    e.add_field(
+        name="Setup",
+        value="Set env `PARTNER_IDS` to a comma-sep list containing both users’ IDs so the bot can infer your partner.",
         inline=False,
     )
     e.set_footer(text="Use the buttons below to switch pages.")
@@ -91,16 +111,6 @@ class HelpPager(discord.ui.View):
     @discord.ui.button(label="Budget", style=discord.ButtonStyle.secondary)
     async def budget_button(self, interaction: Interaction, _: discord.ui.Button):
         await self._switch(interaction, "budget")
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
-    async def close_button(self, interaction: Interaction, _: discord.ui.Button):
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        await interaction.response.edit_message(
-            content="Help closed.", embed=None, view=self
-        )
-        self.stop()
 
 
 # ---------- Cog ----------
