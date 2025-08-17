@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import os
 import typing as t
 from decimal import ROUND_HALF_UP, Decimal
@@ -13,6 +14,10 @@ from src.db import LedgerEntry
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
+
+DAVID_ID = 240608458888445953
+STEPH_ID = 694650702466908160
+MONTHLY_RENT = 230000
 
 
 async def _resolve_partner(interaction: discord.Interaction) -> discord.Member | None:
@@ -58,7 +63,10 @@ class Budget(commands.Cog):
         self.bot = bot
 
     async def _create_ledger_entry(
-        self, interaction: discord.Interaction, cents: int, note: str
+        self,
+        interaction: discord.Interaction,
+        cents: int,
+        note: str,
     ) -> int:
         partner = await _resolve_partner(interaction)
         if not partner:
@@ -113,16 +121,6 @@ class Budget(commands.Cog):
             ephemeral=False,
         )
 
-    @app_commands.command(name="balance", description="Check the balance")
-    async def balance(self, interaction: discord.Interaction):
-        partner = await _resolve_partner(interaction)
-        async with self.bot.db() as s:
-            net_cents = await _net_between(s, partner.id, interaction)
-        await interaction.response.send_message(
-            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
-            ephemeral=True,
-        )
-
     @app_commands.command(
         name="pay",
         description="Select an amount that you have paid the opposing person",
@@ -173,20 +171,24 @@ class Budget(commands.Cog):
             ),
         ]
 
-    # TODO - Implement this
     @app_commands.command(
         name="rent", description="Run once a month to add rent payment"
     )
     async def rent(self, interaction: discord.Interaction):
         partner = await _resolve_partner(interaction)
-        async with self.bot.db() as s:
-            net_cents = await _net_between(s, partner.id, interaction)
+        if interaction.user.id == DAVID_ID:
+            net_cents = await self._create_ledger_entry(
+                interaction, MONTHLY_RENT / 300, "rent"
+            )
+        if interaction.user.id == STEPH_ID:
+            net_cents = await self._create_ledger_entry(
+                interaction, -MONTHLY_RENT / 300, "rent"
+            )
         await interaction.response.send_message(
-            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
+            f"📊 **Current Balance after rent {partner.mention}:**\n{_format_net_message(net_cents)}",
             ephemeral=True,
         )
 
-    # TODO - Implement this
     @app_commands.command(
         name="ledger", description="See the itemized ledger for this month"
     )
@@ -194,10 +196,42 @@ class Budget(commands.Cog):
         partner = await _resolve_partner(interaction)
         async with self.bot.db() as s:
             net_cents = await _net_between(s, partner.id, interaction)
-        await interaction.response.send_message(
-            f"📊 **Current Balance with {partner.mention}:**\n{_format_net_message(net_cents)}",
-            ephemeral=True,
+            entries: list[LedgerEntry] = await _get_ledger_itemized(
+                s, partner, interaction
+            )
+        entry_lines = []
+        for entry in entries:
+            direction = "←" if entry.creditor_id == interaction.user.id else "→"
+            entry_lines.append(
+                f"{entry.created_at:%m/%d} • {interaction.user.mention} {direction} {partner.mention} | {_format_money(entry.amount_cents)} - {entry.note}"
+            )
+        embed = discord.Embed(
+            title=f"📒 Ledger with {partner.display_name} (this month)",
+            description="\n".join(entry_lines),  # cap if you want
+            color=discord.Color.blurple(),
         )
+        embed.add_field(name="Net", value=_format_net_message(net_cents), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        async def _format_entry_line(
+            self, me_id: int, partner_id: int, e: LedgerEntry
+        ) -> str:
+            direction = "→" if e.creditor_id == me_id else "←"
+            who = "You" if e.creditor_id == me_id else "Partner"
+            return f"{e.created_at:%Y-%m-%d} • {who} {direction} {_format_money(e.amount_cents)}"
+
+
+async def _get_ledger_itemized(
+    s, partner_id: int, interaction: discord.Interaction
+) -> None:
+    guild_id = interaction.guild_id
+    start = datetime.datetime.now(datetime.timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    q = select(LedgerEntry).where(
+        LedgerEntry.guild_id == guild_id, LedgerEntry.created_at >= start
+    )
+    return (await s.scalars(q)).all()
 
 
 async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> int:
@@ -205,15 +239,11 @@ async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> 
     me_id = interaction.user.id
     expr = case(
         (
-            (LedgerEntry.settled.is_(False))
-            & (LedgerEntry.creditor_id == me_id)
-            & (LedgerEntry.debtor_id == partner_id),
+            (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id),
             LedgerEntry.amount_cents,
         ),
         (
-            (LedgerEntry.settled.is_(False))
-            & (LedgerEntry.creditor_id == partner_id)
-            & (LedgerEntry.debtor_id == me_id),
+            (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id),
             -LedgerEntry.amount_cents,
         ),
         else_=0,

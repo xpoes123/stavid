@@ -5,11 +5,10 @@ import os
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Awaitable
 
 import asyncpg
 from dotenv import load_dotenv
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Text
+from sqlalchemy import BigInteger, DateTime, Integer, Text
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -23,8 +22,7 @@ os.environ.pop("PGSSLMODE", None)
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-class Base(AsyncAttrs, DeclarativeBase):
-    ...
+class Base(AsyncAttrs, DeclarativeBase): ...
 
 
 def _get_env(name: str, default: str | None = None) -> str | None:
@@ -36,8 +34,8 @@ def _gather_db_params() -> dict:
     host = _get_env("PUBLIC_PGHOST") or _get_env("PGHOST", "localhost")
     port = int(_get_env("PGPORT", "5432"))
     user = _get_env("PGUSER", "postgres") or "postgres"
-    pwd  = _get_env("PGPASSWORD", "") or ""
-    db   = _get_env("PGDATABASE", "postgres") or "postgres"
+    pwd = _get_env("PGPASSWORD", "") or ""
+    db = _get_env("PGDATABASE", "postgres") or "postgres"
     use_ssl = False if host in LOCAL_HOSTS else True
 
     # Debug (no secrets)
@@ -82,10 +80,10 @@ def create_sessionmaker(echo: bool = False) -> async_sessionmaker:
         )
 
     engine = create_async_engine(
-        "postgresql+asyncpg://",     # placeholder; async_creator supplies the real connection
+        "postgresql+asyncpg://",  # placeholder; async_creator supplies the real connection
         echo=echo,
         pool_pre_ping=True,
-        async_creator=_creator,      # ← key line
+        async_creator=_creator,  # ← key line
     )
     return async_sessionmaker(engine, expire_on_commit=False)
 
@@ -104,7 +102,6 @@ class LedgerEntry(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
-    settled: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
 
 
 async def init_db(sessionmaker: async_sessionmaker) -> None:

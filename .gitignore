@@ -24,3 +24,6 @@ ENV/
 
 # Docker
 *.log
+
+migrations/
+alembic.ini
