@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 import os
 import typing as t
 from decimal import ROUND_HALF_UP, Decimal
@@ -10,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import case, func, select
 
-from src.db import LedgerEntry
+from src.db import ReminderEntry
 from src.utils import DAVID_ID, STEPH_ID, resolve_partner
 
 if t.TYPE_CHECKING:
@@ -22,32 +23,33 @@ class Reminder(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
 
-    # async def _create_reminder_entry(
-    #     self,
-    #     interaction: discord.Interaction,
-    #     cents: int,
-    #     note: str,
-    # ) -> int:
-    #     partner = await resolve_partner(interaction)
-    #     if not partner:
-    #         return await interaction.response.send_message(
-    #             "❌ I couldn’t infer who to request from (set `PARTNER_IDS`).",
-    #             ephemeral=True,
-    #         )
-    #     async with self.bot.db() as s:
-    #         s.add(
-    #             LedgerEntry(
-    #                 guild_id=interaction.guild_id or 0,
-    #                 creditor_id=interaction.user.id,
-    #                 debtor_id=partner.id,
-    #                 amount_cents=cents,
-    #                 note=note,
-    #             )
-    #         )
-    #         await s.commit()
+    async def _create_reminder_entry(
+        self,
+        interaction: discord.Interaction,
+        date: datetime,
+        note: str,
+        location: str,
+    ) -> int:
+        partner = await resolve_partner(interaction)
+        if not partner:
+            return await interaction.response.send_message(
+                "❌ I couldn’t infer who to remind from (set `PARTNER_IDS`).",
+                ephemeral=True,
+            )
+        async with self.bot.db() as s:
+            s.add(
+                ReminderEntry(
+                    guild_id=interaction.guild_id or 0,
+                    creator_id=interaction.user.id,
+                    partner_id=partner.id,
+                    time=date,
+                    note=note,
+                    location=location,
+                    done=False,
+                )
+            )
+            await s.commit()
 
-    #         net = await _net_between(s, partner.id, interaction)
-    #     return net
     # TODO Implement this
     @app_commands.command(
         name="remind",

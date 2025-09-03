@@ -18,6 +18,7 @@ from src.db import create_sessionmaker, init_db  # ← updated import
 TEST_GUILD_ID = 1401585357799292958
 COGS_PACKAGE = "src.cogs"
 
+
 class StavidBot(commands.Bot):
     def __init__(self, intents: discord.Intents, db_sessionmaker) -> None:
         intents.message_content = True
@@ -45,6 +46,7 @@ class StavidBot(commands.Bot):
     async def on_ready(self) -> None:
         logging.info("Logged in as %s (%s)", self.user, getattr(self.user, "id", "?"))
 
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ROOT = Path(__file__).resolve().parents[1]
@@ -56,11 +58,12 @@ async def main() -> None:
         raise RuntimeError("Missing DISCORD_TOKEN in env")
 
     SessionLocal = create_sessionmaker(echo=False)  # ← no arg now
-    await init_db(SessionLocal)                     # ← create tables
+    await init_db(SessionLocal)  # ← create tables
 
     bot = StavidBot(discord.Intents.default(), SessionLocal)
     async with bot:
         await bot.start(token)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
