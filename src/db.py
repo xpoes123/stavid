@@ -5,11 +5,11 @@ import os
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 import asyncpg
 from dotenv import load_dotenv
-from sqlalchemy import BigInteger, DateTime, Integer, Text, Boolean
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Text
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 

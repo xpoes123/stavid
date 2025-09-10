@@ -3,7 +3,7 @@ name = "stavid"
 version = "0.01"
 description = "Created a bot to help us manage our apartment"
 readme = "readme.md"
-requires_python = ">=3.13"
+requires_python = ">=3.12"
 
 [tool.ruff]
 lint.extend-select = ["I"]
