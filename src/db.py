@@ -5,195 +5,113 @@ import os
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-import asyncpg
 from dotenv import load_dotenv
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Text
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # -----------------------------------------------------------------------------
-# .env loading (local dev) — safe in Railway (vars not overridden unless explicit)
+# Load .env for local runs (no effect on Heroku)
 # -----------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT / ".env.local", override=True)
 
-# Don't let asyncpg pick up global PGSSLMODE
+# Avoid ambient PGSSLMODE; we control TLS explicitly
 os.environ.pop("PGSSLMODE", None)
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-
-# Prefer URL-style envs in this order
-_URL_VAR_CANDIDATES = ("DATABASE_URL", "POSTGRES_URL", "PGURL")
-
-# Fallback component-style env groups
-_COMPONENT_GROUPS = [
-    ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"),
-    (
-        "POSTGRES_HOST",
-        "POSTGRES_PORT",
-        "POSTGRES_USER",
-        "POSTGRES_PASSWORD",
-        "POSTGRES_DB",
-    ),
-    (
-        "RAILWAY_TCP_HOST",
-        "RAILWAY_TCP_PORT",
-        "POSTGRES_USER",
-        "POSTGRES_PASSWORD",
-        "POSTGRES_DB",
-    ),
-]
+LIBPQ_SSL_KEYS = {"sslmode", "sslrootcert", "sslcert", "sslkey", "sslcrl"}
 
 
-class Base(AsyncAttrs, DeclarativeBase):
-    pass
+# -----------------------------------------------------------------------------
+# URL helpers
+# -----------------------------------------------------------------------------
+def _get_db_url() -> str:
+    url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or os.getenv("PGURL")
+    if not url:
+        raise RuntimeError("DATABASE_URL not set")
+    return url
 
 
-def _get_env(name: str, default: str | None = None) -> str | None:
-    v = os.getenv(name, default)
-    return v.strip() if isinstance(v, str) else v
+def _strip_libpq_ssl_params(url: str) -> str:
+    """Remove libpq-specific SSL params (sslmode, sslrootcert, etc.) from URL."""
+    u = urlparse(url)
+    q = parse_qs(u.query or "", keep_blank_values=True)
+    for k in list(q.keys()):
+        if k.lower() in LIBPQ_SSL_KEYS:
+            q.pop(k, None)
+    new_query = urlencode(q, doseq=True)
+    return urlunparse(u._replace(query=new_query))
 
 
-def _parse_db_url(db_url: str) -> dict:
-    """Parse postgres URL into asyncpg connect kwargs."""
-    db_url = db_url.replace("postgresql+asyncpg://", "postgres://", 1)
-    db_url = db_url.replace("postgresql://", "postgres://", 1)
+def _normalize_asyncpg_url(url: str) -> str:
+    """Coerce scheme to SQLAlchemy's asyncpg URL."""
+    if url.startswith("postgresql+asyncpg://"):
+        return url
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql+psycopg2://"):
+        return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+    return url
 
-    u = urlparse(db_url)
-    if u.scheme not in {"postgres", "postgresql"}:
-        raise ValueError(f"Unsupported DB URL scheme: {u.scheme}")
 
+def _ssl_required(raw_url: str) -> bool:
+    """Decide whether to enable TLS for asyncpg."""
+    # Explicit override via env
+    if m := os.getenv("DB_SSLMODE"):
+        return m.lower() != "disable"
+
+    u = urlparse(raw_url)
+    host = (u.hostname or "localhost").lower()
+    # If user put sslmode in URL, respect it for the decision only
     q = parse_qs(u.query or "")
-    sslmode = (q.get("sslmode", [""])[0] or "").lower()
+    smode = (q.get("sslmode", [""])[0] or "").lower()
+    if smode:
+        return smode != "disable"
 
-    return {
-        "host": u.hostname or "localhost",
-        "port": int(u.port or 5432),
-        "user": unquote(u.username or "postgres"),
-        "password": unquote(u.password or ""),
-        "database": (u.path.lstrip("/") or "postgres"),
-        "sslmode": sslmode,  # '', 'require', 'disable', etc.
-    }
-
-
-def _gather_db_params() -> dict:
-    """Detect DB connection params from env (Railway/Heroku/local)."""
-    # 1) URL-style
-    for var in _URL_VAR_CANDIDATES:
-        val = os.getenv(var)
-        if val:
-            p = _parse_db_url(val)
-            host = p["host"]
-            explicit_mode = os.getenv("DB_SSLMODE") or p["sslmode"]
-            if explicit_mode:
-                use_ssl = explicit_mode != "disable"
-            else:
-                use_ssl = host not in LOCAL_HOSTS
-            _debug_print(host, p["port"], p["user"], p["database"])
-            return {
-                "host": host,
-                "port": p["port"],
-                "user": p["user"],
-                "password": p["password"],
-                "database": p["database"],
-                "use_ssl": use_ssl,
-            }
-
-    # 2) Component-style
-    env = os.environ
-    for H, P, U, PW, DB in _COMPONENT_GROUPS:
-        if env.get(H):
-            host = env.get(H)
-            port = int(env.get(P, "5432"))
-            user = env.get(U, "postgres") or "postgres"
-            pwd = env.get(PW, "") or ""
-            db = env.get(DB, "postgres") or "postgres"
-            explicit_mode = os.getenv("DB_SSLMODE")
-            if explicit_mode:
-                use_ssl = explicit_mode != "disable"
-            else:
-                use_ssl = host not in LOCAL_HOSTS
-            _debug_print(host, port, user, db)
-            return {
-                "host": host,
-                "port": port,
-                "user": user,
-                "password": pwd,
-                "database": db,
-                "use_ssl": use_ssl,
-            }
-
-    # 3) Local defaults
-    host = _get_env("PUBLIC_PGHOST") or _get_env("PGHOST", "localhost")
-    port = int(_get_env("PGPORT", "5432"))
-    user = _get_env("PGUSER", "postgres") or "postgres"
-    pwd = _get_env("PGPASSWORD", "") or ""
-    db = _get_env("PGDATABASE", "postgres") or "postgres"
-    explicit_mode = os.getenv("DB_SSLMODE")
-    if explicit_mode:
-        use_ssl = explicit_mode != "disable"
-    else:
-        use_ssl = host not in LOCAL_HOSTS
-    _debug_print(host, port, user, db)
-    return {
-        "host": host,
-        "port": port,
-        "user": user,
-        "password": pwd,
-        "database": db,
-        "use_ssl": use_ssl,
-    }
-
-
-def _debug_print(host: str, port: int, user: str, db: str) -> None:
-    print("[db] params host/port/user/db ->", host, port, user, db)
-    if os.getenv("DB_PRINT_PASSWORD_DEBUG") == "1":
-        # Only length, no secrets
-        pwd = os.getenv("PGPASSWORD") or os.getenv("POSTGRES_PASSWORD") or ""
-        print("[db] password length:", len(pwd))
+    return host not in LOCAL_HOSTS
 
 
 def _make_ssl_context(use_ssl: bool):
+    """Verifying TLS by default; load CA from env or certifi fallback."""
     if not use_ssl:
         return False  # asyncpg accepts False to disable TLS
+
     ctx = ssl.create_default_context()
-    # If Railway uses a proxy with non-standard chain, you can disable checks in dev:
-    if os.getenv("DB_TRUST_PROXY", "1") == "1":
+
+    # Prefer explicit root cert if provided
+    ca_file = os.getenv("DB_SSLROOTCERT") or os.getenv("SSL_CERT_FILE")
+    if ca_file and os.path.exists(ca_file):
+        ctx.load_verify_locations(cafile=ca_file)
+    else:
+        # Fallback to certifi bundle if available
+        try:
+            import certifi  # type: ignore
+
+            ctx.load_verify_locations(cafile=certifi.where())
+        except Exception:
+            # leave platform defaults
+            pass
+
+    # Only relax verification if explicitly requested (dev only)
+    if os.getenv("DB_TRUST_PROXY") == "1":
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
-def create_sessionmaker(echo: bool = False) -> async_sessionmaker:
-    params = _gather_db_params()
-    ssl_ctx = _make_ssl_context(params["use_ssl"])
-
-    async def _creator():
-        return await asyncpg.connect(
-            host=params["host"],
-            port=params["port"],
-            user=params["user"],
-            password=params["password"],
-            database=params["database"],
-            ssl=ssl_ctx,
-            timeout=10,
-        )
-
-    engine = create_async_engine(
-        "postgresql+asyncpg://",  # placeholder; real conn via async_creator
-        echo=echo,
-        pool_pre_ping=True,
-        async_creator=_creator,
-    )
-    return async_sessionmaker(engine, expire_on_commit=False)
-
-
 # -----------------------------------------------------------------------------
-# Models
+# SQLAlchemy base/models
 # -----------------------------------------------------------------------------
+class Base(AsyncAttrs, DeclarativeBase):
+    pass
+
+
 class LedgerEntry(Base):
     __tablename__ = "ledger_entries"
 
@@ -225,6 +143,27 @@ class ReminderEntry(Base):
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     location: Mapped[str] = mapped_column(Text, default="", nullable=True)
     done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+# -----------------------------------------------------------------------------
+# Engine / Session
+# -----------------------------------------------------------------------------
+def create_sessionmaker(echo: bool = False) -> async_sessionmaker:
+    raw_url = _get_db_url()
+    # Remove libpq SSL params for asyncpg, but still *use* them to decide TLS
+    sanitized = _strip_libpq_ssl_params(raw_url)
+    url = _normalize_asyncpg_url(sanitized)
+
+    ssl_ctx = _make_ssl_context(_ssl_required(raw_url))
+    connect_args = {"ssl": ssl_ctx} if ssl_ctx is not False else {"ssl": False}
+
+    engine = create_async_engine(
+        url,
+        echo=echo,
+        pool_pre_ping=True,
+        connect_args=connect_args,  # forwarded to asyncpg.connect()
+    )
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 # -----------------------------------------------------------------------------
