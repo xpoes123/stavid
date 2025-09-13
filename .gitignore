@@ -24,5 +24,3 @@ ENV/
 
 # Docker
 *.log
-
-migrations/
