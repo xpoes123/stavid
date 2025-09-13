@@ -26,4 +26,3 @@ ENV/
 *.log
 
 migrations/
-alembic.ini
