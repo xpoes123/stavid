@@ -24,3 +24,7 @@ ENV/
 
 # Docker
 *.log
+
+# keep Alembic migrations tracked
+!migrations/
+!migrations/**
