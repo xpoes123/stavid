@@ -1,2 +1,2 @@
-release: alembic -c alembic.ini upgrade head
+release: alembic -c alembic.ini upgrade heads
 worker: python -m src.main
