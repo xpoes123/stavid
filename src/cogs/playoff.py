@@ -73,6 +73,41 @@ def series_message(wins: int, losses: int) -> str:
     return f"⚖️ Tied {wins}–{losses} — anyone's series. Need {wins_needed} more."
 
 
+class CheckinModal(discord.ui.Modal, title="Daily Check-in"):
+    def __init__(self, pillar_names: list[str], callback) -> None:
+        super().__init__()
+        self._callback = callback
+        self.p1 = discord.ui.TextInput(
+            label=pillar_names[0][:45],
+            placeholder="y or n",
+            max_length=3,
+        )
+        self.p2 = discord.ui.TextInput(
+            label=pillar_names[1][:45],
+            placeholder="y or n",
+            max_length=3,
+        )
+        self.p3 = discord.ui.TextInput(
+            label=pillar_names[2][:45],
+            placeholder="y or n",
+            max_length=3,
+        )
+        self.add_item(self.p1)
+        self.add_item(self.p2)
+        self.add_item(self.p3)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        def parse(val: str) -> bool:
+            return val.strip().lower() in ("y", "yes", "1", "true")
+
+        await self._callback(
+            interaction,
+            parse(self.p1.value),
+            parse(self.p2.value),
+            parse(self.p3.value),
+        )
+
+
 class Playoff(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
@@ -90,12 +125,11 @@ class Playoff(commands.Cog):
     # ------------------------------------------------------------------ #
 
     @app_commands.command(name="checkin", description="Log your daily pillars")
-    @app_commands.describe(
-        pillar1="Did you complete your first pillar?",
-        pillar2="Did you complete your second pillar?",
-        pillar3="Did you complete your third pillar?",
-    )
-    async def checkin(
+    async def checkin(self, interaction: discord.Interaction) -> None:
+        modal = CheckinModal(get_pillar_names(interaction.user.id), self._process_checkin)
+        await interaction.response.send_modal(modal)
+
+    async def _process_checkin(
         self,
         interaction: discord.Interaction,
         pillar1: bool,
