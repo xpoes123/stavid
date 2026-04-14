@@ -1,0 +1,393 @@
+# src/cogs/playoff.py
+from __future__ import annotations
+
+import os
+import typing as t
+from datetime import datetime, timezone, date, timedelta
+from zoneinfo import ZoneInfo
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from sqlalchemy import select
+
+from src.db import PlayoffCheckin, PlayoffSeries, WeeklyReview
+from src.utils import DAVID_ID, STEPH_ID
+
+if t.TYPE_CHECKING:
+    from src.main import StavidBot
+
+ET = ZoneInfo("America/New_York")
+
+DAVID_PILLARS = [
+    "Write & reflect on daily priorities",
+    "10,000 steps",
+    "Max Claude usage or 30min on personal project",
+]
+STEPH_PILLARS = [
+    "TikTok ≤ 90 minutes",
+    "Some form of movement",
+    "At least 15 min on a finite project",
+]
+
+
+def get_pillar_names(user_id: int) -> list[str]:
+    if user_id == DAVID_ID:
+        return DAVID_PILLARS
+    if user_id == STEPH_ID:
+        return STEPH_PILLARS
+    return ["Pillar 1", "Pillar 2", "Pillar 3"]
+
+
+def today_et() -> date:
+    return datetime.now(ET).date()
+
+
+def week_start_for(d: date) -> date:
+    """Return the Monday of the week containing d."""
+    return d - timedelta(days=d.weekday())
+
+
+def series_message(wins: int, losses: int) -> str:
+    """Return motivational / status text for current series score."""
+    if wins >= 4:
+        return "🏆 **Series Won!** You won the week!"
+    if losses >= 4:
+        return "💀 Series lost. Better luck next week."
+
+    wins_needed = 4 - wins
+    games_left = 7 - wins - losses
+
+    if losses >= 3 and wins < 2:
+        return (
+            f"⚠️ Down {wins}–{losses} — need {wins_needed} straight. **Still alive!**"
+        )
+    if losses > wins:
+        return (
+            f"📊 Down {wins}–{losses} — still in it. "
+            f"Need {wins_needed} more win{'s' if wins_needed != 1 else ''} "
+            f"with {games_left} left."
+        )
+    if wins > losses:
+        return f"✅ Up {wins}–{losses} — keep the momentum! Need {wins_needed} more."
+    return f"⚖️ Tied {wins}–{losses} — anyone's series. Need {wins_needed} more."
+
+
+class Playoff(commands.Cog):
+    def __init__(self, bot: StavidBot) -> None:
+        self.bot = bot
+        self._pinged_dates: set[date] = set()
+        self._reviewed_dates: set[date] = set()
+        self.daily_ping.start()
+        self.sunday_review.start()
+
+    def cog_unload(self) -> None:
+        self.daily_ping.cancel()
+        self.sunday_review.cancel()
+
+    # ------------------------------------------------------------------ #
+    # Commands                                                             #
+    # ------------------------------------------------------------------ #
+
+    @app_commands.command(name="checkin", description="Log your daily pillars")
+    @app_commands.describe(
+        pillar1="Did you complete your first pillar?",
+        pillar2="Did you complete your second pillar?",
+        pillar3="Did you complete your third pillar?",
+    )
+    async def checkin(
+        self,
+        interaction: discord.Interaction,
+        pillar1: bool,
+        pillar2: bool,
+        pillar3: bool,
+    ) -> None:
+        today = today_et()
+        week_start = week_start_for(today)
+        user_id = interaction.user.id
+        guild_id = interaction.guild_id or 0
+        pillar_names = get_pillar_names(user_id)
+        won_day = pillar1 and pillar2 and pillar3
+
+        async with self.bot.db() as s:
+            # Upsert today's check-in
+            existing = await s.scalar(
+                select(PlayoffCheckin).where(
+                    PlayoffCheckin.guild_id == guild_id,
+                    PlayoffCheckin.user_id == user_id,
+                    PlayoffCheckin.checkin_date == today,
+                )
+            )
+            if existing:
+                existing.pillar1 = pillar1
+                existing.pillar2 = pillar2
+                existing.pillar3 = pillar3
+                existing.updated_at = datetime.now(timezone.utc)
+            else:
+                s.add(
+                    PlayoffCheckin(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        checkin_date=today,
+                        pillar1=pillar1,
+                        pillar2=pillar2,
+                        pillar3=pillar3,
+                    )
+                )
+            await s.commit()
+
+            # Recalculate series from all check-ins this week
+            checkins = (
+                await s.scalars(
+                    select(PlayoffCheckin).where(
+                        PlayoffCheckin.guild_id == guild_id,
+                        PlayoffCheckin.user_id == user_id,
+                        PlayoffCheckin.checkin_date >= week_start,
+                    )
+                )
+            ).all()
+
+            wins = sum(
+                1 for c in checkins if c.pillar1 and c.pillar2 and c.pillar3
+            )
+            losses = len(checkins) - wins
+
+            if wins >= 4:
+                status = "won"
+            elif losses >= 4:
+                status = "lost"
+            else:
+                status = "ongoing"
+
+            # Upsert series record
+            series = await s.scalar(
+                select(PlayoffSeries).where(
+                    PlayoffSeries.guild_id == guild_id,
+                    PlayoffSeries.user_id == user_id,
+                    PlayoffSeries.week_start == week_start,
+                )
+            )
+            if series:
+                series.wins = wins
+                series.losses = losses
+                series.status = status
+            else:
+                s.add(
+                    PlayoffSeries(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        week_start=week_start,
+                        wins=wins,
+                        losses=losses,
+                        status=status,
+                    )
+                )
+            await s.commit()
+
+        color = discord.Color.green() if won_day else discord.Color.red()
+        day_result = "✅ WIN" if won_day else "❌ LOSS"
+
+        embed = discord.Embed(
+            title=f"{day_result} — {today.strftime('%A, %b %d')}",
+            color=color,
+        )
+        embed.add_field(
+            name="Pillars",
+            value="\n".join(
+                f"{'✅' if v else '❌'} {name}"
+                for name, v in zip(pillar_names, [pillar1, pillar2, pillar3])
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=f"Series — {wins}W {losses}L",
+            value=series_message(wins, losses),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="playoff_status",
+        description="Check current series scores for both players",
+    )
+    async def playoff_status(self, interaction: discord.Interaction) -> None:
+        today = today_et()
+        week_start = week_start_for(today)
+        guild_id = interaction.guild_id or 0
+
+        embed = discord.Embed(
+            title=f"🏆 Playoff Week — {week_start.strftime('Week of %b %d')}",
+            color=discord.Color.blurple(),
+        )
+
+        async with self.bot.db() as s:
+            for user_id, display_name in [(DAVID_ID, "David"), (STEPH_ID, "Stephanie")]:
+                series = await s.scalar(
+                    select(PlayoffSeries).where(
+                        PlayoffSeries.guild_id == guild_id,
+                        PlayoffSeries.user_id == user_id,
+                        PlayoffSeries.week_start == week_start,
+                    )
+                )
+                wins = series.wins if series else 0
+                losses = series.losses if series else 0
+
+                today_checkin = await s.scalar(
+                    select(PlayoffCheckin).where(
+                        PlayoffCheckin.guild_id == guild_id,
+                        PlayoffCheckin.user_id == user_id,
+                        PlayoffCheckin.checkin_date == today,
+                    )
+                )
+                today_status = "✅ checked in" if today_checkin else "⏳ not yet"
+
+                embed.add_field(
+                    name=f"{display_name} — {wins}W {losses}L",
+                    value=f"{series_message(wins, losses)}\nToday: {today_status}",
+                    inline=False,
+                )
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="series_history",
+        description="View your past series results",
+    )
+    async def series_history(self, interaction: discord.Interaction) -> None:
+        user_id = interaction.user.id
+        guild_id = interaction.guild_id or 0
+
+        async with self.bot.db() as s:
+            rows = (
+                await s.scalars(
+                    select(PlayoffSeries)
+                    .where(
+                        PlayoffSeries.guild_id == guild_id,
+                        PlayoffSeries.user_id == user_id,
+                    )
+                    .order_by(PlayoffSeries.week_start.desc())
+                    .limit(8)
+                )
+            ).all()
+
+        if not rows:
+            await interaction.response.send_message(
+                "No series history yet. Use `/checkin` to get started!",
+                ephemeral=True,
+            )
+            return
+
+        icons = {"won": "🏆", "lost": "💀", "ongoing": "🔄"}
+        lines = [
+            f"{icons.get(r.status, '❓')} Week of {r.week_start.strftime('%b %d')} — "
+            f"**{r.wins}–{r.losses}** ({r.status})"
+            for r in rows
+        ]
+        won_count = sum(1 for r in rows if r.status == "won")
+
+        embed = discord.Embed(
+            title="📊 Your Series History",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"Won {won_count} of {len(rows)} series shown")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------ #
+    # Background tasks                                                     #
+    # ------------------------------------------------------------------ #
+
+    @tasks.loop(hours=1)
+    async def daily_ping(self) -> None:
+        """At 9 pm ET, remind users who haven't checked in yet."""
+        now_et = datetime.now(ET)
+        today = now_et.date()
+
+        if now_et.hour != 21 or today in self._pinged_dates:
+            return
+        self._pinged_dates.add(today)
+
+        channel_id = os.getenv("CHECKIN_CHANNEL_ID")
+        if not channel_id or not channel_id.isdigit():
+            return
+        channel = self.bot.get_channel(int(channel_id))
+        if channel is None:
+            return
+
+        for user_id in (DAVID_ID, STEPH_ID):
+            async with self.bot.db() as s:
+                already = await s.scalar(
+                    select(PlayoffCheckin).where(
+                        PlayoffCheckin.user_id == user_id,
+                        PlayoffCheckin.checkin_date == today,
+                    )
+                )
+            if already:
+                continue
+
+            pillar_list = "\n".join(
+                f"{i + 1}. {p}" for i, p in enumerate(get_pillar_names(user_id))
+            )
+            member = channel.guild.get_member(user_id)
+            mention = member.mention if member else f"<@{user_id}>"
+            await channel.send(
+                f"⏰ {mention} — daily check-in time!\n"
+                f"Your pillars:\n{pillar_list}\n\n"
+                f"Use `/checkin` to log your results!"
+            )
+
+    @daily_ping.before_loop
+    async def before_daily_ping(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=1)
+    async def sunday_review(self) -> None:
+        """On Sunday at 10 am ET, post a weekly review prompt."""
+        now_et = datetime.now(ET)
+        today = now_et.date()
+
+        if now_et.weekday() != 6 or now_et.hour != 10 or today in self._reviewed_dates:
+            return
+        self._reviewed_dates.add(today)
+
+        channel_id = os.getenv("CHECKIN_CHANNEL_ID")
+        if not channel_id or not channel_id.isdigit():
+            return
+        channel = self.bot.get_channel(int(channel_id))
+        if channel is None:
+            return
+
+        last_week_start = week_start_for(today) - timedelta(weeks=1)
+
+        lines = ["☀️ **Sunday Weekly Review**\n"]
+        async with self.bot.db() as s:
+            for user_id, display_name in [(DAVID_ID, "David"), (STEPH_ID, "Stephanie")]:
+                series = await s.scalar(
+                    select(PlayoffSeries).where(
+                        PlayoffSeries.user_id == user_id,
+                        PlayoffSeries.week_start == last_week_start,
+                    )
+                )
+                if series:
+                    result = f"**{series.wins}–{series.losses}** ({series.status})"
+                else:
+                    result = "No data"
+                lines.append(f"**{display_name}:** {result}")
+
+        lines += [
+            "",
+            "Take a moment to reflect:",
+            "• What went well this week?",
+            "• What do you want to focus on next week?",
+            "",
+            "New series starts tomorrow (Monday). You've got this! 💪",
+        ]
+        await channel.send("\n".join(lines))
+
+    @sunday_review.before_loop
+    async def before_sunday_review(self) -> None:
+        await self.bot.wait_until_ready()
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Playoff(bot))

@@ -1,113 +1,113 @@
-# 🛠️ Apartment Discord Bot – Command Reference
+# StavidBot — Apartment & Habits Discord Bot
 
-This bot helps manage daily apartment life including chores, reminders, groceries, bills, and activities. Use the following slash commands to automate and organize tasks.
+A Discord bot for David and Stephanie ("Stavid") to manage shared apartment life and personal habit tracking.
 
----
-
-## 📅 Scheduling & Reminders
-
-### `/reminders @user "message" <time> <date>`
-
-Creates a reminder that pings the user at regular intervals leading up to the deadline.  
-**Example:**  
-`/reminders @stephanie "Don't forget to ship the return packages" 3pm 8/8/25`
-
-### `/schedule "event name" <date> <time> [@participants]`
-
-Creates a Google Calendar invite and notifies the participants.  
-**Example:**  
-`/schedule "Dinner with landlord" 8/10/25 6pm @david @stephanie`
+**Stack:** Python 3.12 · discord.py 2.5+ · SQLAlchemy async · PostgreSQL · Heroku
 
 ---
 
-## 🧹 Chores & Tasks
+## Setup
 
-### `/chore <frequency> "chore name" [random]`
+1. Clone the repo and install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Assigns a chore at a given frequency (`week`, `month`, etc). If `random` is specified, the assignee is chosen randomly. The chore load is split evenly over time.  
-**Example:**  
-`/chore month "Clean sink" random`
+2. Copy `.env.example` to `.env` and fill in your values:
+   ```
+   DISCORD_TOKEN=...
+   DATABASE_URL=postgresql+asyncpg://...
+   PARTNER_IDS=240608458888445953,694650702466908160
+   wifi_name=...
+   wifi_password=...
+   ```
 
-### `/task @user "task description"`
+3. Run migrations:
+   ```bash
+   alembic upgrade heads
+   ```
 
-Creates an ad-hoc task and assigns it to the tagged user.  
-**Example:**  
-`/task @david "Fix the door"`
-
----
-
-## 🛒 Groceries & Shopping
-
-### `/groceries "item name"`
-
-Adds an item to the grocery list. The list is refreshed when `/groceries bought` or a similar command is used.  
-**Example:**  
-`/groceries "Sesame Oil"`
-
-### `/shopping_list "item name"`
-
-Adds a general (non-food) item to the shopping list for everyone to see.  
-**Example:**  
-`/shopping_list "Scissors"`
+4. Start the bot:
+   ```bash
+   python -m src.main
+   ```
 
 ---
 
-## 💸 Budgeting & Bills
+## Commands
 
-### `/budget`
+### Utilities
 
-Parses Chase statements and compares actual spending to an externally defined proposed budget.  
-**Note:** Requires linking or uploading the bank statement file.
+#### `/help`
+Shows a paged help embed covering all available commands.
 
-### `/venmo @user <amount>`
-
-Used to calculate and display how much each person owes at the start of the month, including rent and shared expenses.  
-**Example:**  
-`/venmo @stephanie 1345`
+#### `/wifi`
+Displays the guest WiFi network name and password (ephemeral).
 
 ---
 
-## 🍽️ Food & Entertainment
+### Budget & Expenses
 
-### `/restaurant <food> <center> <radius>`
+#### `/venmo amount:<number> note:<text>`
+Creates a ledger entry recording that your partner owes you.
+```
+/venmo amount:23.50 note:Dinner
+```
 
-Finds a restaurant using Google Maps API based on food type, location, and search radius.  
-**Example:**  
-`/restaurant sushi "Astoria NY" 2km`
+#### `/pay amount:<number> [note:<text>]`
+Records a payment you made to your partner. Autocompletes the suggested net amount.
+```
+/pay amount:50 note:Rent share
+```
 
-### `/activity`
+#### `/rent`
+Adds the monthly rent split to the ledger and shows the updated balance.
 
-Finds a random activity happening in New York that day using an events API (e.g. Eventbrite, Meetup).  
-**Example:**  
-`/activity`
+#### `/wifi_bill`
+Adds the monthly WiFi split to the ledger and shows the updated balance.
 
----
-
-## 🔧 Utilities
-
-### `/wifi`
-
-Displays the apartment's WiFi network name and password for quick access.  
-**Example:**  
-`/wifi`
-
-### `/lost_item "item name"`
-
-Adds an item to the list of lost items so everyone is aware and can help find it.  
-**Example:**  
-`/lost_item "TV remote"`
-
-### `/quote "quote text"`
-
-Adds a quote to the apartment memory log for fun moments.  
-**Example:**  
-`/quote "You better cook with love" - David`
+#### `/ledger`
+Shows an itemized list of this month's entries and the current net balance (ephemeral).
 
 ---
 
-## 🔁 Recurring System Tasks
+### Reminders *(coming soon)*
 
-The bot also supports recurring reminders:
+#### `/remind date:<date> time:<time> note:<text> [location:<text>]`
+Creates a reminder that pings both users.
 
-- Rent due on the **1st of every month**
-- Bill reminders with customizable due dates
+#### `/reminders`
+Lists all active reminders.
+
+#### `/reset_reminders`
+Marks all reminders as done.
+
+---
+
+## Planned Features
+
+| Feature | Description |
+|---------|-------------|
+| **Playoff Week** | Weekly habit tracking — each day is a win or loss based on personal pillars; need 4 wins to win the week |
+| **Reminders** | Time-based pings for both users with optional location context |
+| **Chores** | Rotating chore assignments with configurable frequency |
+| **Grocery list** | Shared running grocery list |
+| **Restaurant finder** | Random restaurant suggestions via Google Maps |
+
+See the design docs (`00_overview.md` through `03_open_questions.md`) for the full Playoff Week spec.
+
+---
+
+## Deployment (Heroku)
+
+The bot runs as a **worker dyno** (no web server). Migrations run automatically on each deploy via the release phase.
+
+```bash
+git push heroku main
+```
+
+Config vars to set on Heroku:
+- `DISCORD_TOKEN`
+- `DATABASE_URL` (set automatically by Heroku Postgres add-on)
+- `PARTNER_IDS`
+- `wifi_name`, `wifi_password`

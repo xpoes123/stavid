@@ -31,6 +31,40 @@ def basic_help_embed() -> discord.Embed:
     return e
 
 
+def playoff_help_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="🏆 StavidBot — Playoff Week",
+        description="Track your weekly habit series. Win 4 days to win the week.",
+        color=discord.Color.gold(),
+    )
+    e.add_field(
+        name="/checkin pillar1:<yes/no> pillar2:<yes/no> pillar3:<yes/no>",
+        value="Log your 3 pillars for today. A WIN requires all 3. Updates your series score automatically.",
+        inline=False,
+    )
+    e.add_field(
+        name="/playoff_status",
+        value="See the current series score for both David and Stephanie, plus today's check-in status.",
+        inline=False,
+    )
+    e.add_field(
+        name="/series_history",
+        value="View your last 8 series results (ephemeral).",
+        inline=False,
+    )
+    e.add_field(
+        name="How it works",
+        value=(
+            "Each week is a best-of-7 series. Win = all 3 pillars hit. "
+            "First to 4 wins takes the week. "
+            "The bot pings the check-in channel at 9 pm ET if you haven't logged yet."
+        ),
+        inline=False,
+    )
+    e.set_footer(text="Use the buttons below to switch pages.")
+    return e
+
+
 def budget_help_embed() -> discord.Embed:
     e = discord.Embed(
         title="💸 StavidBot — Budget",
@@ -80,7 +114,7 @@ def budget_help_embed() -> discord.Embed:
 class HelpPager(discord.ui.View):
     def __init__(self, start_page: str = "basic"):
         super().__init__(timeout=120)
-        self.page = start_page  # "basic" | "budget"
+        self.page = start_page  # "basic" | "budget" | "playoff"
         self._sync_button_styles()
 
     def _sync_button_styles(self):
@@ -95,9 +129,18 @@ class HelpPager(discord.ui.View):
             if self.page == "budget"
             else discord.ButtonStyle.secondary
         )
+        self.playoff_button.style = (
+            discord.ButtonStyle.primary
+            if self.page == "playoff"
+            else discord.ButtonStyle.secondary
+        )
 
     def _current_embed(self) -> discord.Embed:
-        return basic_help_embed() if self.page == "basic" else budget_help_embed()
+        if self.page == "basic":
+            return basic_help_embed()
+        if self.page == "budget":
+            return budget_help_embed()
+        return playoff_help_embed()
 
     async def _switch(self, interaction: Interaction, to: str):
         self.page = to
@@ -111,6 +154,10 @@ class HelpPager(discord.ui.View):
     @discord.ui.button(label="Budget", style=discord.ButtonStyle.secondary)
     async def budget_button(self, interaction: Interaction, _: discord.ui.Button):
         await self._switch(interaction, "budget")
+
+    @discord.ui.button(label="Playoff", style=discord.ButtonStyle.secondary)
+    async def playoff_button(self, interaction: Interaction, _: discord.ui.Button):
+        await self._switch(interaction, "playoff")
 
 
 # ---------- Cog ----------

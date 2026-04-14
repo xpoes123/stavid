@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import os
 import ssl
+import datetime as _dt
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from dotenv import load_dotenv
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Text
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -143,6 +144,60 @@ class ReminderEntry(Base):
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     location: Mapped[str] = mapped_column(Text, default="", nullable=True)
     done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class PlayoffCheckin(Base):
+    __tablename__ = "playoff_checkins"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    checkin_date: Mapped[_dt.date] = mapped_column(Date, nullable=False)
+    pillar1: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pillar2: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pillar3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class PlayoffSeries(Base):
+    __tablename__ = "playoff_series"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    week_start: Mapped[_dt.date] = mapped_column(Date, nullable=False)
+    wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    losses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="ongoing", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class WeeklyReview(Base):
+    __tablename__ = "weekly_reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    week_of: Mapped[_dt.date] = mapped_column(Date, nullable=False)
+    review_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
 
 # -----------------------------------------------------------------------------
