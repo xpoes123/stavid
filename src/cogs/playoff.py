@@ -333,11 +333,11 @@ class Playoff(commands.Cog):
 
     @tasks.loop(hours=1)
     async def daily_ping(self) -> None:
-        """At 9 pm ET, remind users who haven't checked in yet."""
+        """At 10 pm ET, remind users who haven't checked in yet."""
         now_et = datetime.now(ET)
         today = now_et.date()
 
-        if now_et.hour != 21 or today in self._pinged_dates:
+        if now_et.hour != 22 or today in self._pinged_dates:
             return
         self._pinged_dates.add(today)
 
