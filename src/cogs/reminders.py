@@ -82,3 +82,7 @@ class Reminder(commands.Cog):
     )
     async def reset_reminders(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("TODO reset", ephemeral=True)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Reminder(bot))
