@@ -157,10 +157,15 @@ class Budget(commands.Cog):
             net_cents = await self._create_ledger_entry(
                 interaction, MONTHLY_RENT // 3, "rent"
             )
-        if interaction.user.id == STEPH_ID:
+        elif interaction.user.id == STEPH_ID:
             net_cents = await self._create_ledger_entry(
                 interaction, -(MONTHLY_RENT // 3), "rent"
             )
+        else:
+            await interaction.response.send_message(
+                "This command is only available to David and Steph.", ephemeral=True
+            )
+            return
         await interaction.response.send_message(
             f"📊 **Current Balance after rent {partner.mention}:**\n{_format_net_message(net_cents)}",
         )
@@ -172,8 +177,13 @@ class Budget(commands.Cog):
         partner = await resolve_partner(interaction)
         if interaction.user.id == DAVID_ID:
             net_cents = await self._create_ledger_entry(interaction, 8000 // 3, "wifi")
-        if interaction.user.id == STEPH_ID:
+        elif interaction.user.id == STEPH_ID:
             net_cents = await self._create_ledger_entry(interaction, -(8000 // 3), "wifi")
+        else:
+            await interaction.response.send_message(
+                "This command is only available to David and Steph.", ephemeral=True
+            )
+            return
         await interaction.response.send_message(
             f"📊 **Current Balance after wifi {partner.mention}:**\n{_format_net_message(net_cents)}",
         )
