@@ -137,8 +137,8 @@ class Budget(commands.Cog):
 
         label_sign = (
             "they owe you"
-            if net_cents < 0
-            else ("you owe them" if net_cents > 0 else "zip")
+            if net_cents > 0
+            else ("you owe them" if net_cents < 0 else "zip")
         )
         suggested_amount = abs(Decimal(net_cents) / Decimal(100))
         return [
