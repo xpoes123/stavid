@@ -170,21 +170,33 @@ class Playoff(commands.Cog):
                 )
             await s.commit()
 
-            # Recalculate series from all check-ins this week
-            checkins = (
+            # Recalculate shared series from both users' check-ins this week
+            all_checkins = (
                 await s.scalars(
                     select(PlayoffCheckin).where(
                         PlayoffCheckin.guild_id == guild_id,
-                        PlayoffCheckin.user_id == user_id,
                         PlayoffCheckin.checkin_date >= week_start,
                     )
                 )
             ).all()
 
-            wins = sum(
-                1 for c in checkins if c.pillar1 and c.pillar2 and c.pillar3
-            )
-            losses = len(checkins) - wins
+            # Group by date; a day counts only when both players have checked in
+            by_date: dict[date, dict[int, PlayoffCheckin]] = {}
+            for c in all_checkins:
+                by_date.setdefault(c.checkin_date, {})[c.user_id] = c
+
+            wins = 0
+            losses = 0
+            for day_checkins in by_date.values():
+                if DAVID_ID not in day_checkins or STEPH_ID not in day_checkins:
+                    continue  # still waiting on one player — day not yet settled
+                d_c = day_checkins[DAVID_ID]
+                s_c = day_checkins[STEPH_ID]
+                if (d_c.pillar1 and d_c.pillar2 and d_c.pillar3
+                        and s_c.pillar1 and s_c.pillar2 and s_c.pillar3):
+                    wins += 1
+                else:
+                    losses += 1
 
             if wins >= 4:
                 status = "won"
@@ -193,11 +205,10 @@ class Playoff(commands.Cog):
             else:
                 status = "ongoing"
 
-            # Upsert series record
+            # Upsert shared series record (one row per guild/week, no user_id)
             series = await s.scalar(
                 select(PlayoffSeries).where(
                     PlayoffSeries.guild_id == guild_id,
-                    PlayoffSeries.user_id == user_id,
                     PlayoffSeries.week_start == week_start,
                 )
             )
@@ -209,7 +220,6 @@ class Playoff(commands.Cog):
                 s.add(
                     PlayoffSeries(
                         guild_id=guild_id,
-                        user_id=user_id,
                         week_start=week_start,
                         wins=wins,
                         losses=losses,
@@ -249,56 +259,63 @@ class Playoff(commands.Cog):
         week_start = week_start_for(today)
         guild_id = interaction.guild_id or 0
 
+        async with self.bot.db() as s:
+            series = await s.scalar(
+                select(PlayoffSeries).where(
+                    PlayoffSeries.guild_id == guild_id,
+                    PlayoffSeries.week_start == week_start,
+                )
+            )
+            wins = series.wins if series else 0
+            losses = series.losses if series else 0
+
+            david_checkin = await s.scalar(
+                select(PlayoffCheckin).where(
+                    PlayoffCheckin.guild_id == guild_id,
+                    PlayoffCheckin.user_id == DAVID_ID,
+                    PlayoffCheckin.checkin_date == today,
+                )
+            )
+            steph_checkin = await s.scalar(
+                select(PlayoffCheckin).where(
+                    PlayoffCheckin.guild_id == guild_id,
+                    PlayoffCheckin.user_id == STEPH_ID,
+                    PlayoffCheckin.checkin_date == today,
+                )
+            )
+
         embed = discord.Embed(
             title=f"🏆 Playoff Week — {week_start.strftime('Week of %b %d')}",
             color=discord.Color.blurple(),
         )
-
-        async with self.bot.db() as s:
-            for user_id, display_name in [(DAVID_ID, "David"), (STEPH_ID, "Stephanie")]:
-                series = await s.scalar(
-                    select(PlayoffSeries).where(
-                        PlayoffSeries.guild_id == guild_id,
-                        PlayoffSeries.user_id == user_id,
-                        PlayoffSeries.week_start == week_start,
-                    )
-                )
-                wins = series.wins if series else 0
-                losses = series.losses if series else 0
-
-                today_checkin = await s.scalar(
-                    select(PlayoffCheckin).where(
-                        PlayoffCheckin.guild_id == guild_id,
-                        PlayoffCheckin.user_id == user_id,
-                        PlayoffCheckin.checkin_date == today,
-                    )
-                )
-                today_status = "✅ checked in" if today_checkin else "⏳ not yet"
-
-                embed.add_field(
-                    name=f"{display_name} — {wins}W {losses}L",
-                    value=f"{series_message(wins, losses)}\nToday: {today_status}",
-                    inline=False,
-                )
+        embed.add_field(
+            name=f"Stavid Series — {wins}W {losses}L",
+            value=series_message(wins, losses),
+            inline=False,
+        )
+        embed.add_field(
+            name="Today's Check-ins",
+            value=(
+                f"David: {'✅ checked in' if david_checkin else '⏳ not yet'}\n"
+                f"Stephanie: {'✅ checked in' if steph_checkin else '⏳ not yet'}"
+            ),
+            inline=False,
+        )
 
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(
         name="series_history",
-        description="View your past series results",
+        description="View past series results",
     )
     async def series_history(self, interaction: discord.Interaction) -> None:
-        user_id = interaction.user.id
         guild_id = interaction.guild_id or 0
 
         async with self.bot.db() as s:
             rows = (
                 await s.scalars(
                     select(PlayoffSeries)
-                    .where(
-                        PlayoffSeries.guild_id == guild_id,
-                        PlayoffSeries.user_id == user_id,
-                    )
+                    .where(PlayoffSeries.guild_id == guild_id)
                     .order_by(PlayoffSeries.week_start.desc())
                     .limit(8)
                 )
@@ -320,7 +337,7 @@ class Playoff(commands.Cog):
         won_count = sum(1 for r in rows if r.status == "won")
 
         embed = discord.Embed(
-            title="📊 Your Series History",
+            title="📊 Stavid Series History",
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
@@ -393,20 +410,20 @@ class Playoff(commands.Cog):
 
         last_week_start = week_start_for(today) - timedelta(weeks=1)
 
+        guild_id = channel.guild.id if channel.guild else 0
         lines = ["☀️ **Sunday Weekly Review**\n"]
         async with self.bot.db() as s:
-            for user_id, display_name in [(DAVID_ID, "David"), (STEPH_ID, "Stephanie")]:
-                series = await s.scalar(
-                    select(PlayoffSeries).where(
-                        PlayoffSeries.user_id == user_id,
-                        PlayoffSeries.week_start == last_week_start,
-                    )
+            series = await s.scalar(
+                select(PlayoffSeries).where(
+                    PlayoffSeries.guild_id == guild_id,
+                    PlayoffSeries.week_start == last_week_start,
                 )
-                if series:
-                    result = f"**{series.wins}–{series.losses}** ({series.status})"
-                else:
-                    result = "No data"
-                lines.append(f"**{display_name}:** {result}")
+            )
+            if series:
+                result = f"**{series.wins}–{series.losses}** ({series.status})"
+            else:
+                result = "No data"
+            lines.append(f"Last week's series: {result}")
 
         lines += [
             "",

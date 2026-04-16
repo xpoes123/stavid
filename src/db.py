@@ -173,7 +173,6 @@ class PlayoffSeries(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     week_start: Mapped[_dt.date] = mapped_column(Date, nullable=False)
     wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     losses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
