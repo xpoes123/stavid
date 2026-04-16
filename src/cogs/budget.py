@@ -196,7 +196,7 @@ class Budget(commands.Cog):
         async with self.bot.db() as s:
             net_cents = await _net_between(s, partner.id, interaction)
             entries: list[LedgerEntry] = await _get_ledger_itemized(
-                s, partner, interaction
+                s, partner.id, interaction
             )
         entry_lines = []
         for entry in entries:
@@ -222,13 +222,19 @@ class Budget(commands.Cog):
 
 async def _get_ledger_itemized(
     s, partner_id: int, interaction: discord.Interaction
-) -> None:
+) -> list[LedgerEntry]:
     guild_id = interaction.guild_id
+    me_id = interaction.user.id
     start = datetime.datetime.now(datetime.timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
     )
     q = select(LedgerEntry).where(
-        LedgerEntry.guild_id == guild_id, LedgerEntry.created_at >= start
+        LedgerEntry.guild_id == guild_id,
+        LedgerEntry.created_at >= start,
+        (
+            (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id)
+            | (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id)
+        ),
     )
     return (await s.scalars(q)).all()
 
