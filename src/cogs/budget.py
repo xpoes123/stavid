@@ -18,6 +18,10 @@ if t.TYPE_CHECKING:
 MONTHLY_RENT = 230000
 
 
+class PartnerResolutionError(Exception):
+    """Raised by _create_ledger_entry when the partner cannot be resolved."""
+
+
 def _format_money(cents: int) -> str:
     """Helper to format cents into a nice $xx.xx string."""
     return f"${Decimal(cents) / Decimal(100):,.2f}"
@@ -47,10 +51,11 @@ class Budget(commands.Cog):
     ) -> int:
         partner = await resolve_partner(interaction)
         if not partner:
-            return await interaction.response.send_message(
+            await interaction.response.send_message(
                 "❌ I couldn’t infer who to request from (set `PARTNER_IDS`).",
                 ephemeral=True,
             )
+            raise PartnerResolutionError
         async with self.bot.db() as s:
             s.add(
                 LedgerEntry(
@@ -83,9 +88,12 @@ class Budget(commands.Cog):
         cents = int(
             Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100
         )
-        net_cents = await self._create_ledger_entry(
-            interaction=interaction, cents=cents, note=note
-        )
+        try:
+            net_cents = await self._create_ledger_entry(
+                interaction=interaction, cents=cents, note=note
+            )
+        except PartnerResolutionError:
+            return
         partner = await resolve_partner(interaction)
         await interaction.response.send_message(
             (
@@ -112,9 +120,12 @@ class Budget(commands.Cog):
         cents = int(
             Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100
         )
-        net_cents = await self._create_ledger_entry(
-            interaction=interaction, cents=cents, note=note
-        )
+        try:
+            net_cents = await self._create_ledger_entry(
+                interaction=interaction, cents=cents, note=note
+            )
+        except PartnerResolutionError:
+            return
         await interaction.response.send_message(
             (
                 f"💵 **Payment Recorded**\n"
