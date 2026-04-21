@@ -44,8 +44,8 @@ def today_et() -> date:
 
 
 def week_start_for(d: date) -> date:
-    """Return the Monday of the week containing d."""
-    return d - timedelta(days=d.weekday())
+    """Return the Sunday that starts the week containing d (weeks run Sun–Sat)."""
+    return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
 def series_message(wins: int, losses: int) -> str:
@@ -408,7 +408,7 @@ class Playoff(commands.Cog):
         if channel is None:
             return
 
-        last_week_start = week_start_for(today) - timedelta(weeks=1)
+        prev_week_start = week_start_for(today) - timedelta(weeks=1)
 
         guild_id = channel.guild.id if channel.guild else 0
         lines = ["☀️ **Sunday Weekly Review**\n"]
@@ -416,7 +416,7 @@ class Playoff(commands.Cog):
             series = await s.scalar(
                 select(PlayoffSeries).where(
                     PlayoffSeries.guild_id == guild_id,
-                    PlayoffSeries.week_start == last_week_start,
+                    PlayoffSeries.week_start == prev_week_start,
                 )
             )
             if series:
@@ -431,7 +431,7 @@ class Playoff(commands.Cog):
             "• What went well this week?",
             "• What do you want to focus on next week?",
             "",
-            "New series starts tomorrow (Monday). You've got this! 💪",
+            "New series starts today — fresh slate. You've got this! 💪",
         ]
         await channel.send("\n".join(lines))
 
