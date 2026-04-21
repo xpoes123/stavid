@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import select
 
-from src.db import PlayoffCheckin, PlayoffSeries, WeeklyReview
+from src.db import DailyResult, PlayoffCheckin, PlayoffSeries, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
 if t.TYPE_CHECKING:
@@ -141,10 +141,10 @@ class Playoff(commands.Cog):
         user_id = interaction.user.id
         guild_id = interaction.guild_id or 0
         pillar_names = get_pillar_names(user_id)
-        won_day = pillar1 and pillar2 and pillar3
+        individual_win = pillar1 and pillar2 and pillar3
 
         async with self.bot.db() as s:
-            # Upsert today's check-in
+            # --- Step 1: upsert this user's individual check-in ---
             existing = await s.scalar(
                 select(PlayoffCheckin).where(
                     PlayoffCheckin.guild_id == guild_id,
@@ -170,33 +170,67 @@ class Playoff(commands.Cog):
                 )
             await s.commit()
 
-            # Recalculate shared series from both users' check-ins this week
-            all_checkins = (
+            # --- Step 2: if both players have checked in, settle today's combined result ---
+            david_checkin = await s.scalar(
+                select(PlayoffCheckin).where(
+                    PlayoffCheckin.guild_id == guild_id,
+                    PlayoffCheckin.user_id == DAVID_ID,
+                    PlayoffCheckin.checkin_date == today,
+                )
+            )
+            steph_checkin = await s.scalar(
+                select(PlayoffCheckin).where(
+                    PlayoffCheckin.guild_id == guild_id,
+                    PlayoffCheckin.user_id == STEPH_ID,
+                    PlayoffCheckin.checkin_date == today,
+                )
+            )
+
+            today_result: DailyResult | None = None
+            if david_checkin and steph_checkin:
+                david_complete = (
+                    david_checkin.pillar1 and david_checkin.pillar2 and david_checkin.pillar3
+                )
+                steph_complete = (
+                    steph_checkin.pillar1 and steph_checkin.pillar2 and steph_checkin.pillar3
+                )
+                won_shared = david_complete and steph_complete
+
+                existing_result = await s.scalar(
+                    select(DailyResult).where(
+                        DailyResult.guild_id == guild_id,
+                        DailyResult.result_date == today,
+                    )
+                )
+                if existing_result:
+                    existing_result.david_complete = david_complete
+                    existing_result.steph_complete = steph_complete
+                    existing_result.won = won_shared
+                    existing_result.updated_at = datetime.now(timezone.utc)
+                    today_result = existing_result
+                else:
+                    today_result = DailyResult(
+                        guild_id=guild_id,
+                        result_date=today,
+                        david_complete=david_complete,
+                        steph_complete=steph_complete,
+                        won=won_shared,
+                    )
+                    s.add(today_result)
+                await s.commit()
+
+            # --- Step 3: derive series tally from DailyResult rows (authoritative) ---
+            daily_results = (
                 await s.scalars(
-                    select(PlayoffCheckin).where(
-                        PlayoffCheckin.guild_id == guild_id,
-                        PlayoffCheckin.checkin_date >= week_start,
+                    select(DailyResult).where(
+                        DailyResult.guild_id == guild_id,
+                        DailyResult.result_date >= week_start,
                     )
                 )
             ).all()
 
-            # Group by date; a day counts only when both players have checked in
-            by_date: dict[date, dict[int, PlayoffCheckin]] = {}
-            for c in all_checkins:
-                by_date.setdefault(c.checkin_date, {})[c.user_id] = c
-
-            wins = 0
-            losses = 0
-            for day_checkins in by_date.values():
-                if DAVID_ID not in day_checkins or STEPH_ID not in day_checkins:
-                    continue  # still waiting on one player — day not yet settled
-                d_c = day_checkins[DAVID_ID]
-                s_c = day_checkins[STEPH_ID]
-                if (d_c.pillar1 and d_c.pillar2 and d_c.pillar3
-                        and s_c.pillar1 and s_c.pillar2 and s_c.pillar3):
-                    wins += 1
-                else:
-                    losses += 1
+            wins = sum(1 for r in daily_results if r.won)
+            losses = sum(1 for r in daily_results if not r.won)
 
             if wins >= 4:
                 status = "won"
@@ -205,7 +239,7 @@ class Playoff(commands.Cog):
             else:
                 status = "ongoing"
 
-            # Upsert shared series record (one row per guild/week, no user_id)
+            # --- Step 4: upsert shared series record ---
             series = await s.scalar(
                 select(PlayoffSeries).where(
                     PlayoffSeries.guild_id == guild_id,
@@ -228,21 +262,41 @@ class Playoff(commands.Cog):
                 )
             await s.commit()
 
-        color = discord.Color.green() if won_day else discord.Color.red()
-        day_result = "✅ WIN" if won_day else "❌ LOSS"
+        # --- Build response embed ---
+        individual_label = "✅ WIN" if individual_win else "❌ LOSS"
+        if today_result is not None:
+            color = discord.Color.green() if today_result.won else discord.Color.red()
+        else:
+            color = discord.Color.blurple()
 
         embed = discord.Embed(
-            title=f"{day_result} — {today.strftime('%A, %b %d')}",
+            title=f"{individual_label} — {today.strftime('%A, %b %d')}",
             color=color,
         )
         embed.add_field(
-            name="Pillars",
+            name="Your Pillars",
             value="\n".join(
                 f"{'✅' if v else '❌'} {name}"
                 for name, v in zip(pillar_names, [pillar1, pillar2, pillar3])
             ),
             inline=False,
         )
+
+        # Combined result — only available once both players have checked in
+        if today_result is not None:
+            if today_result.won:
+                combined_text = "🏆 **Shared WIN** — both complete!"
+            else:
+                missed = []
+                if not today_result.david_complete:
+                    missed.append("David")
+                if not today_result.steph_complete:
+                    missed.append("Stephanie")
+                combined_text = f"💀 **Shared LOSS** — {', '.join(missed)} didn't complete all pillars"
+        else:
+            combined_text = "⏳ Waiting for other player to check in..."
+
+        embed.add_field(name="Combined Result", value=combined_text, inline=False)
         embed.add_field(
             name=f"Series — {wins}W {losses}L",
             value=series_message(wins, losses),
@@ -269,6 +323,14 @@ class Playoff(commands.Cog):
             wins = series.wins if series else 0
             losses = series.losses if series else 0
 
+            today_result = await s.scalar(
+                select(DailyResult).where(
+                    DailyResult.guild_id == guild_id,
+                    DailyResult.result_date == today,
+                )
+            )
+
+            # Only needed for the "waiting" state when no combined result yet
             david_checkin = await s.scalar(
                 select(PlayoffCheckin).where(
                     PlayoffCheckin.guild_id == guild_id,
@@ -293,14 +355,29 @@ class Playoff(commands.Cog):
             value=series_message(wins, losses),
             inline=False,
         )
-        embed.add_field(
-            name="Today's Check-ins",
-            value=(
-                f"David: {'✅ checked in' if david_checkin else '⏳ not yet'}\n"
-                f"Stephanie: {'✅ checked in' if steph_checkin else '⏳ not yet'}"
-            ),
-            inline=False,
-        )
+
+        # Combined day result is authoritative once both players have checked in
+        if today_result is not None:
+            if today_result.won:
+                today_text = "🏆 **Shared WIN** — both complete!"
+            else:
+                missed = []
+                if not today_result.david_complete:
+                    missed.append("David")
+                if not today_result.steph_complete:
+                    missed.append("Stephanie")
+                today_text = f"💀 **Shared LOSS** — {', '.join(missed)} didn't complete all pillars"
+            embed.add_field(name="Today's Combined Result", value=today_text, inline=False)
+        else:
+            # Day not yet settled — show individual check-in status
+            embed.add_field(
+                name="Today's Check-ins",
+                value=(
+                    f"David: {'✅ checked in' if david_checkin else '⏳ not yet'}\n"
+                    f"Stephanie: {'✅ checked in' if steph_checkin else '⏳ not yet'}"
+                ),
+                inline=False,
+            )
 
         await interaction.response.send_message(embed=embed)
 
