@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from src.cogs.playoff import get_pillar_names, series_message, week_start_for
-from src.db import PlayoffCheckin, PlayoffSeries
+from src.db import DailyResult, PlayoffCheckin, PlayoffSeries
 from src.utils import DAVID_ID, STEPH_ID
 
 GUILD_ID = 999_000_000_000_000_000
@@ -421,6 +421,224 @@ async def test_series_row_persisted(db_session):
     assert row.wins == 3
     assert row.losses == 1
     assert row.status == "ongoing"
+
+
+# ---------------------------------------------------------------------------
+# DB persistence — DailyResult (combined win/loss, authoritative per day)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_daily_result_persisted(db_session):
+    """A DailyResult row can be written and read back."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        DailyResult(
+            guild_id=GUILD_ID,
+            result_date=date(2026, 4, 21),
+            david_complete=True,
+            steph_complete=True,
+            won=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(DailyResult).where(
+            DailyResult.guild_id == GUILD_ID,
+            DailyResult.result_date == date(2026, 4, 21),
+        )
+    )
+    assert row is not None
+    assert row.won is True
+    assert row.david_complete is True
+    assert row.steph_complete is True
+
+
+@pytest.mark.asyncio
+async def test_daily_result_loss_when_one_incomplete(db_session):
+    """won=False when either player is incomplete."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        DailyResult(
+            guild_id=GUILD_ID,
+            result_date=date(2026, 4, 21),
+            david_complete=True,
+            steph_complete=False,  # Steph didn't finish
+            won=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(DailyResult).where(
+            DailyResult.guild_id == GUILD_ID,
+            DailyResult.result_date == date(2026, 4, 21),
+        )
+    )
+    assert row is not None
+    assert row.won is False
+    assert row.david_complete is True
+    assert row.steph_complete is False
+
+
+@pytest.mark.asyncio
+async def test_daily_result_upsert(db_session):
+    """Re-settling a day (e.g., after a re-checkin) updates the existing row."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        DailyResult(
+            guild_id=GUILD_ID,
+            result_date=date(2026, 4, 21),
+            david_complete=True,
+            steph_complete=False,
+            won=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    # Steph re-checks in — now both complete
+    row = await db_session.scalar(
+        select(DailyResult).where(
+            DailyResult.guild_id == GUILD_ID,
+            DailyResult.result_date == date(2026, 4, 21),
+        )
+    )
+    row.steph_complete = True
+    row.won = True
+    row.updated_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(DailyResult).where(
+            DailyResult.guild_id == GUILD_ID,
+            DailyResult.result_date == date(2026, 4, 21),
+        )
+    )
+    assert refreshed.won is True
+    assert refreshed.steph_complete is True
+
+
+@pytest.mark.asyncio
+async def test_series_tally_from_daily_results(db_session):
+    """Series wins/losses derived from DailyResult rows match expected counts."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # 3 wins, 1 loss over 4 days
+    for i in range(3):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    db_session.add(
+        DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=3),
+            david_complete=True,
+            steph_complete=False,
+            won=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    rows = (
+        await db_session.scalars(
+            select(DailyResult).where(
+                DailyResult.guild_id == GUILD_ID,
+                DailyResult.result_date >= week_start,
+            )
+        )
+    ).all()
+
+    wins = sum(1 for r in rows if r.won)
+    losses = sum(1 for r in rows if not r.won)
+    assert wins == 3
+    assert losses == 1
+
+
+@pytest.mark.asyncio
+async def test_no_daily_result_until_both_checked_in(db_session):
+    """DailyResult is absent when only one player has a PlayoffCheckin."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        PlayoffCheckin(
+            guild_id=GUILD_ID,
+            user_id=DAVID_ID,
+            checkin_date=date(2026, 4, 21),
+            pillar1=True,
+            pillar2=True,
+            pillar3=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    # No DailyResult should exist yet — Steph hasn't checked in
+    result = await db_session.scalar(
+        select(DailyResult).where(
+            DailyResult.guild_id == GUILD_ID,
+            DailyResult.result_date == date(2026, 4, 21),
+        )
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_combined_win_requires_both_complete(db_session):
+    """won=True only when david_complete AND steph_complete are both True."""
+    now = datetime.now(timezone.utc)
+    today = date(2026, 4, 21)
+
+    cases = [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, True),
+    ]
+    for i, (dc, sc, expected_won) in enumerate(cases):
+        result_date = today + timedelta(days=i)
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=result_date,
+                david_complete=dc,
+                steph_complete=sc,
+                won=dc and sc,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    for i, (dc, sc, expected_won) in enumerate(cases):
+        result_date = today + timedelta(days=i)
+        row = await db_session.scalar(
+            select(DailyResult).where(
+                DailyResult.guild_id == GUILD_ID,
+                DailyResult.result_date == result_date,
+            )
+        )
+        assert row is not None
+        assert row.won is expected_won, (
+            f"dc={dc}, sc={sc}: expected won={expected_won}, got {row.won}"
+        )
 
 
 # ---------------------------------------------------------------------------

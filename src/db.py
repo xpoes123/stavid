@@ -184,6 +184,37 @@ class PlayoffSeries(Base):
     )
 
 
+class DailyResult(Base):
+    """Combined win/loss for a single day — authoritative result for the series.
+
+    A row is created (or updated) only once both David and Stephanie have
+    submitted their check-ins for the day.  ``won`` is True only when both
+    players completed all three pillars.  Individual completion flags
+    (``david_complete``, ``steph_complete``) are stored so individual progress
+    remains visible without re-joining to ``playoff_checkins``.
+    """
+
+    __tablename__ = "daily_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    result_date: Mapped[_dt.date] = mapped_column(Date, nullable=False)
+    david_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    steph_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # True iff david_complete AND steph_complete — this is the authoritative result
+    won: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class WeeklyReview(Base):
     __tablename__ = "weekly_reviews"
 
