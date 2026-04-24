@@ -1130,6 +1130,71 @@ async def test_history_multiple_weeks_grouped_correctly(db_session):
     assert sum(1 for r in w2_rows if r.steph_complete) == 2
 
 
+@pytest.mark.asyncio
+async def test_checkin_tally_bounded_to_current_week(db_session):
+    """Series tally only counts DailyResult rows within the current week (Sun–Sat).
+
+    Rows from adjacent weeks must not bleed into the current week's win count.
+    This mirrors the result_date >= week_start AND <= week_start+6 query used in
+    _process_checkin Step 3.
+    """
+    week1 = SUNDAY_APR_19           # Apr 19–25
+    week2 = SUNDAY_APR_19 + timedelta(weeks=1)  # Apr 26–May 2
+    now = datetime.now(timezone.utc)
+
+    # Week 1: 3 wins on Mon–Wed
+    for i in range(1, 4):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week1 + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    # Week 2: 2 wins on Sun–Mon of next week
+    for i in range(2):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week2 + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    # Tally for week1 — must exclude week2 results
+    week1_rows = (
+        await db_session.scalars(
+            select(DailyResult).where(
+                DailyResult.guild_id == GUILD_ID,
+                DailyResult.result_date >= week1,
+                DailyResult.result_date <= week1 + timedelta(days=6),
+            )
+        )
+    ).all()
+
+    assert sum(1 for r in week1_rows if r.won) == 3
+    # Tally for week2 — must exclude week1 results
+    week2_rows = (
+        await db_session.scalars(
+            select(DailyResult).where(
+                DailyResult.guild_id == GUILD_ID,
+                DailyResult.result_date >= week2,
+                DailyResult.result_date <= week2 + timedelta(days=6),
+            )
+        )
+    ).all()
+    assert sum(1 for r in week2_rows if r.won) == 2
+
+
 # ---------------------------------------------------------------------------
 # series_history auto-heal — stale "ongoing" status for completed past weeks
 # ---------------------------------------------------------------------------

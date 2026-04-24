@@ -322,6 +322,7 @@ class Playoff(commands.Cog):
                     select(DailyResult).where(
                         DailyResult.guild_id == guild_id,
                         DailyResult.result_date >= week_start,
+                        DailyResult.result_date <= week_start + timedelta(days=6),
                     )
                 )
             ).all()
