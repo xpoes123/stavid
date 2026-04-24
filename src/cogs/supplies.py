@@ -1,9 +1,12 @@
 # src/cogs/supplies.py
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import typing as t
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
@@ -12,6 +15,38 @@ from discord.ext import commands, tasks
 from sqlalchemy import func, select
 
 from src.db import SupplyCheckResult, SupplyItem
+
+_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "supply_items.json"
+
+
+def _load_default_items(path: Path = _CONFIG_PATH) -> list[str]:
+    """Return the default item names from the config file."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+async def seed_supply_items(session, guild_id: int, names: list[str]) -> int:
+    """Insert items from *names* that have no existing row for *guild_id*.
+
+    Rows that exist but are inactive (soft-deleted) are left untouched —
+    the user removed them intentionally.  Returns the count of new rows added.
+    """
+    existing_names = {
+        n.lower()
+        for n in (
+            await session.scalars(
+                select(SupplyItem.name).where(SupplyItem.guild_id == guild_id)
+            )
+        ).all()
+    }
+    to_add = [n for n in names if n.lower() not in existing_names]
+    for name in to_add:
+        session.add(SupplyItem(guild_id=guild_id, name=name, active=True))
+    if to_add:
+        await session.commit()
+    return len(to_add)
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
@@ -32,6 +67,19 @@ class Supplies(commands.Cog):
 
     def cog_unload(self) -> None:
         self.weekly_supply_check.cancel()
+
+    async def cog_load(self) -> None:
+        asyncio.create_task(self._seed_default_items())
+
+    async def _seed_default_items(self) -> None:
+        """Seed default items from config into every guild on startup."""
+        await self.bot.wait_until_ready()
+        names = _load_default_items()
+        if not names:
+            return
+        for guild in self.bot.guilds:
+            async with self.bot.db() as s:
+                await seed_supply_items(s, guild.id, names)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
