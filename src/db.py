@@ -278,6 +278,9 @@ class ShoppingItem(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    og_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    og_price: Mapped[str | None] = mapped_column(Text, nullable=True)
+    og_image: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # -----------------------------------------------------------------------------
