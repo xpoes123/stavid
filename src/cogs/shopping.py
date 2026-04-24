@@ -90,8 +90,13 @@ class Shopping(commands.Cog):
     @shopping.command(name="remove", description="Mark an item as bought and remove it")
     @app_commands.describe(item="Item to remove")
     async def remove(self, interaction: discord.Interaction, item: str) -> None:
+        try:
+            item_id = int(item)
+        except ValueError:
+            await interaction.response.send_message("❌ Item not found.", ephemeral=True)
+            return
         async with self.bot.db() as s:
-            row = await s.get(ShoppingItem, int(item))
+            row = await s.get(ShoppingItem, item_id)
             if row is None or row.bought or row.guild_id != interaction.guild_id:
                 await interaction.response.send_message(
                     "❌ Item not found.", ephemeral=True
