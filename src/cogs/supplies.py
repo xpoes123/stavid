@@ -59,6 +59,163 @@ def _this_sunday(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
+def _build_status_embed(
+    items: list[SupplyItem],
+    flagged_item_ids: set[int],
+    week_of: date,
+) -> discord.Embed:
+    """Build the supply check embed showing current flag status."""
+    lines = []
+    for item in items:
+        if item.id in flagged_item_ids:
+            lines.append(f"🔴 ~~{item.name}~~ _needs restock_")
+        else:
+            lines.append(f"• {item.name}")
+
+    embed = discord.Embed(
+        title=f"🛒 Weekly Supply Check — {week_of.strftime('week of %b %d')}",
+        description="\n".join(lines) if lines else "_No items tracked yet._",
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text="Select items below that are running low!")
+    return embed
+
+
+class SupplyCheckView(discord.ui.View):
+    """Interactive dropdown view for the weekly supply check."""
+
+    def __init__(
+        self,
+        items: list[SupplyItem],
+        guild_id: int,
+        week_of: date,
+        db,  # sessionmaker
+    ) -> None:
+        super().__init__(timeout=86400)  # 24 hours
+        self.items = items
+        self.guild_id = guild_id
+        self.week_of = week_of
+        self.db = db
+
+        if not items:
+            return
+
+        # Discord Select menus cap at 25 options per menu.
+        # Split into chunks if needed.
+        chunks = [items[i:i + 25] for i in range(0, len(items), 25)]
+        for idx, chunk in enumerate(chunks):
+            options = [
+                discord.SelectOption(label=item.name, value=str(item.id))
+                for item in chunk
+            ]
+            select = SupplySelectMenu(
+                options=options,
+                placeholder=(
+                    "Select items that are running low…"
+                    if idx == 0
+                    else f"More items ({idx + 1}/{len(chunks)})…"
+                ),
+                guild_id=guild_id,
+                week_of=week_of,
+                db=db,
+                view_ref=self,
+                all_items=items,
+            )
+            self.add_item(select)
+
+
+class SupplySelectMenu(discord.ui.Select):
+    def __init__(
+        self,
+        options: list[discord.SelectOption],
+        placeholder: str,
+        guild_id: int,
+        week_of: date,
+        db,
+        view_ref: SupplyCheckView,
+        all_items: list[SupplyItem],
+    ) -> None:
+        super().__init__(
+            placeholder=placeholder,
+            min_values=0,
+            max_values=len(options),
+            options=options,
+        )
+        self.guild_id = guild_id
+        self.week_of = week_of
+        self.db = db
+        self.view_ref = view_ref
+        self.all_items = all_items
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected_ids = [int(v) for v in self.values]
+        user_id = interaction.user.id
+
+        newly_flagged: list[str] = []
+        already_flagged: list[str] = []
+        item_by_id = {item.id: item for item in self.all_items}
+
+        async with self.db() as s:
+            for item_id in selected_ids:
+                existing = await s.scalar(
+                    select(SupplyCheckResult).where(
+                        SupplyCheckResult.guild_id == self.guild_id,
+                        SupplyCheckResult.week_of == self.week_of,
+                        SupplyCheckResult.item_id == item_id,
+                        SupplyCheckResult.user_id == user_id,
+                    )
+                )
+                if existing:
+                    item = item_by_id.get(item_id)
+                    if item:
+                        already_flagged.append(item.name)
+                    continue
+
+                s.add(
+                    SupplyCheckResult(
+                        guild_id=self.guild_id,
+                        week_of=self.week_of,
+                        item_id=item_id,
+                        user_id=user_id,
+                    )
+                )
+                item = item_by_id.get(item_id)
+                if item:
+                    newly_flagged.append(item.name)
+
+            await s.commit()
+
+            # Fetch all flags so far to update the embed
+            all_item_ids = [item.id for item in self.all_items]
+            flagged_rows = (
+                await s.scalars(
+                    select(SupplyCheckResult).where(
+                        SupplyCheckResult.guild_id == self.guild_id,
+                        SupplyCheckResult.week_of == self.week_of,
+                        SupplyCheckResult.item_id.in_(all_item_ids),
+                    )
+                )
+            ).all()
+
+        flagged_item_ids = {row.item_id for row in flagged_rows}
+
+        # Build response message
+        parts = []
+        if newly_flagged:
+            parts.append(f"Flagged for restock: {', '.join(newly_flagged)}")
+        if already_flagged:
+            parts.append(f"Already flagged (skipped): {', '.join(already_flagged)}")
+        if not newly_flagged and not already_flagged:
+            parts.append("Nothing selected — no changes made.")
+
+        reply = "\n".join(parts)
+
+        # Update the original message embed to reflect current flags
+        updated_embed = _build_status_embed(self.all_items, flagged_item_ids, self.week_of)
+        await interaction.response.edit_message(embed=updated_embed, view=self.view_ref)
+        await interaction.followup.send(reply, ephemeral=True)
+
+
 class Supplies(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
@@ -99,23 +256,25 @@ class Supplies(commands.Cog):
             ).all()
         )
 
-    async def _build_checklist_message(self, guild_id: int, week_of: date) -> str:
-        """Return the formatted Sunday checklist string."""
+    async def _build_checklist_embed(
+        self, guild_id: int, week_of: date
+    ) -> tuple[discord.Embed, SupplyCheckView]:
+        """Return the embed and interactive view for the weekly checklist."""
         async with self.bot.db() as s:
             items = await self._active_items(guild_id, s)
 
         if not items:
-            return (
-                "🛒 **Weekly Supply Check** — no items tracked yet.\n"
-                "Use `/supply_add` to add household supplies to the checklist!"
+            embed = discord.Embed(
+                title="🛒 Weekly Supply Check",
+                description="No items tracked yet.\nUse `/supply_add` to add household supplies!",
+                color=discord.Color.blue(),
             )
+            embed.set_footer(text="Select items below that are running low!")
+            return embed, SupplyCheckView([], guild_id, week_of, self.bot.db)
 
-        item_lines = "\n".join(f"• {item.name}" for item in items)
-        return (
-            f"🛒 **Weekly Supply Check** — {week_of.strftime('week of %b %d')}\n\n"
-            f"{item_lines}\n\n"
-            "Use `/supply_restock` to flag anything that's running low!"
-        )
+        embed = _build_status_embed(items, set(), week_of)
+        view = SupplyCheckView(items, guild_id, week_of, self.bot.db)
+        return embed, view
 
     # ------------------------------------------------------------------ #
     # Autocomplete                                                         #
@@ -342,29 +501,9 @@ class Supplies(commands.Cog):
             ).all()
 
         flagged_item_ids = {row.item_id for row in flagged_rows}
-        item_by_id = {item.id: item for item in items}
-
-        lines = []
-        for item in items:
-            flag = " 🔴 _needs restock_" if item.id in flagged_item_ids else ""
-            lines.append(f"• {item.name}{flag}")
-
-        embed = discord.Embed(
-            title=f"🛒 Supply Check — {week_of.strftime('week of %b %d')}",
-            description="\n".join(lines),
-            color=discord.Color.blue(),
-        )
-        if flagged_item_ids:
-            flagged_names = ", ".join(
-                item_by_id[fid].name
-                for fid in flagged_item_ids
-                if fid in item_by_id
-            )
-            embed.set_footer(text=f"Flagged for restock: {flagged_names}")
-        else:
-            embed.set_footer(text="Nothing flagged yet — use /supply_restock to log what's low")
-
-        await interaction.response.send_message(embed=embed)
+        embed = _build_status_embed(items, flagged_item_ids, week_of)
+        view = SupplyCheckView(items, guild_id, week_of, self.bot.db)
+        await interaction.response.send_message(embed=embed, view=view)
 
     # ------------------------------------------------------------------ #
     # Background task                                                      #
@@ -372,12 +511,12 @@ class Supplies(commands.Cog):
 
     @tasks.loop(hours=1)
     async def weekly_supply_check(self) -> None:
-        """Every Sunday at noon ET, post the supply checklist to the channel."""
+        """Every Sunday at 10am ET, post the supply checklist to the channel."""
         now_et = datetime.now(ET)
         today = now_et.date()
 
-        # weekday() == 6 is Sunday; fire at 12:00
-        if now_et.weekday() != 6 or now_et.hour != 12 or today in self._checked_sundays:
+        # weekday() == 6 is Sunday; fire at 10:00
+        if now_et.weekday() != 6 or now_et.hour != 10 or today in self._checked_sundays:
             return
         self._checked_sundays.add(today)
 
@@ -390,8 +529,8 @@ class Supplies(commands.Cog):
 
         guild_id = channel.guild.id if channel.guild else 0
         week_of = _this_sunday(today)
-        message = await self._build_checklist_message(guild_id, week_of)
-        await channel.send(message)
+        embed, view = await self._build_checklist_embed(guild_id, week_of)
+        await channel.send(embed=embed, view=view)
 
     @weekly_supply_check.before_loop
     async def before_weekly_supply_check(self) -> None:
