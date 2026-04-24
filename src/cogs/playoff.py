@@ -48,6 +48,17 @@ def week_start_for(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
+def finalize_series_status(daily_results: list[DailyResult]) -> str:
+    """Determine the final "won" or "lost" status for a completed week.
+
+    Called at week end (Sunday review) to lock in the result.  A series
+    is won only if 4 or more combined wins were recorded; anything less is
+    a loss — the week is over and there are no more days to play.
+    """
+    wins = sum(1 for r in daily_results if r.won)
+    return "won" if wins >= 4 else "lost"
+
+
 def series_message(wins: int, losses: int) -> str:
     """Return motivational / status text for current series score."""
     if wins >= 4:
@@ -468,21 +479,46 @@ class Playoff(commands.Cog):
                 )
             ).all()
 
-        if not rows:
-            await interaction.response.send_message(
-                "No series history yet. Use `/checkin` to get started!",
-                ephemeral=True,
-            )
-            return
+            if not rows:
+                await interaction.response.send_message(
+                    "No series history yet. Use `/checkin` to get started!",
+                    ephemeral=True,
+                )
+                return
+
+            # Fetch per-person completion data for all shown weeks in one query
+            oldest_week = rows[-1].week_start
+            newest_week_end = rows[0].week_start + timedelta(days=6)
+            daily_rows = (
+                await s.scalars(
+                    select(DailyResult).where(
+                        DailyResult.guild_id == guild_id,
+                        DailyResult.result_date >= oldest_week,
+                        DailyResult.result_date <= newest_week_end,
+                    )
+                )
+            ).all()
+
+        # Group DailyResult rows by the Sunday that started their week
+        daily_by_week: dict[date, list[DailyResult]] = {}
+        for dr in daily_rows:
+            ws = week_start_for(dr.result_date)
+            daily_by_week.setdefault(ws, []).append(dr)
 
         icons = {"won": "🏆", "lost": "💀", "ongoing": "🔄"}
-        lines = [
-            f"{icons.get(r.status, '❓')} Week of {r.week_start.strftime('%b %d')} — "
-            f"**{r.wins}–{r.losses}** ({r.status})"
-            for r in rows
-        ]
-        won_count = sum(1 for r in rows if r.status == "won")
+        lines = []
+        for r in rows:
+            icon = icons.get(r.status, "❓")
+            week_daily = daily_by_week.get(r.week_start, [])
+            david_days = sum(1 for dr in week_daily if dr.david_complete)
+            steph_days = sum(1 for dr in week_daily if dr.steph_complete)
+            lines.append(
+                f"{icon} Week of {r.week_start.strftime('%b %d')} — "
+                f"**{r.wins}–{r.losses}** ({r.status})"
+                f"  D:{david_days}/7 S:{steph_days}/7"
+            )
 
+        won_count = sum(1 for r in rows if r.status == "won")
         embed = discord.Embed(
             title="📊 Stavid Series History",
             description="\n".join(lines),
@@ -573,6 +609,35 @@ class Playoff(commands.Cog):
                 .scalars()
                 .all()
             )
+
+            # Finalize the previous week's series record so history is accurate
+            # even for weeks that didn't hit 4 wins/losses before the week ended.
+            if rows:
+                wins_final = sum(1 for r in rows if r.won)
+                losses_final = sum(1 for r in rows if not r.won)
+                final_status = finalize_series_status(rows)
+
+                prev_series = await s.scalar(
+                    select(PlayoffSeries).where(
+                        PlayoffSeries.guild_id == guild_id,
+                        PlayoffSeries.week_start == prev_week_start,
+                    )
+                )
+                if prev_series:
+                    prev_series.wins = wins_final
+                    prev_series.losses = losses_final
+                    prev_series.status = final_status
+                else:
+                    s.add(
+                        PlayoffSeries(
+                            guild_id=guild_id,
+                            week_start=prev_week_start,
+                            wins=wins_final,
+                            losses=losses_final,
+                            status=final_status,
+                        )
+                    )
+                await s.commit()
 
         summary = format_weekly_summary(rows, prev_week_start)
         await channel.send(summary)

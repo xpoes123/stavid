@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from src.cogs.playoff import format_weekly_summary, get_pillar_names, series_message, week_start_for
+from src.cogs.playoff import finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
 from src.db import DailyResult, PlayoffCheckin, PlayoffSeries
 from src.utils import DAVID_ID, STEPH_ID
 
@@ -787,6 +787,346 @@ def test_summary_under_discord_limit():
     results = [_make_result(i, david=True, steph=True) for i in range(7)]
     msg = format_weekly_summary(results, WEEK_SUN)
     assert len(msg) <= 2000
+
+
+# ---------------------------------------------------------------------------
+# finalize_series_status — week-end status determination
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_status_won_at_exactly_four():
+    results = [_make_result(i, david=True, steph=True) for i in range(4)]
+    assert finalize_series_status(results) == "won"
+
+
+def test_finalize_status_won_with_extra_wins():
+    """6-win week is still "won"."""
+    results = [_make_result(i, david=True, steph=True) for i in range(6)]
+    assert finalize_series_status(results) == "won"
+
+
+def test_finalize_status_lost_at_three_wins():
+    """3 wins, 4 losses — didn't reach 4, so the week is a loss."""
+    results = [_make_result(i, david=True, steph=True) for i in range(3)]
+    results += [_make_result(i + 3, david=False, steph=True) for i in range(4)]
+    assert finalize_series_status(results) == "lost"
+
+
+def test_finalize_status_lost_on_empty_week():
+    """No activity → no wins → lost."""
+    assert finalize_series_status([]) == "lost"
+
+
+def test_finalize_status_lost_when_all_losses():
+    results = [_make_result(i, david=False, steph=True) for i in range(7)]
+    assert finalize_series_status(results) == "lost"
+
+
+# ---------------------------------------------------------------------------
+# DB: series finalization at week end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_series_finalized_won_from_daily_results(db_session):
+    """A week with 4+ wins is finalized as 'won' in PlayoffSeries."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # 5 wins, 2 losses — series is won
+    for i in range(5):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    for i in range(5, 7):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=False,
+                steph_complete=True,
+                won=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    rows = (
+        await db_session.scalars(
+            select(DailyResult).where(DailyResult.guild_id == GUILD_ID)
+        )
+    ).all()
+
+    # Simulate week-end finalization
+    wins = sum(1 for r in rows if r.won)
+    losses = sum(1 for r in rows if not r.won)
+    status = finalize_series_status(rows)
+
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=wins,
+            losses=losses,
+            status=status,
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert series is not None
+    assert series.wins == 5
+    assert series.losses == 2
+    assert series.status == "won"
+
+
+@pytest.mark.asyncio
+async def test_series_finalized_lost_when_ongoing_status_overwritten(db_session):
+    """An 'ongoing' series stuck at 3-3 is finalized to 'lost' at week end."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # Pre-existing series record at 3-3 (ongoing — neither reached 4)
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=3,
+            losses=3,
+            status="ongoing",
+            created_at=now,
+        )
+    )
+
+    daily_results = []
+    for i in range(3):
+        r = DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=True,
+            steph_complete=True,
+            won=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(r)
+        daily_results.append(r)
+    for i in range(3, 6):
+        r = DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=False,
+            steph_complete=True,
+            won=False,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(r)
+        daily_results.append(r)
+    await db_session.commit()
+
+    # Simulate week-end finalization overwriting "ongoing"
+    final_status = finalize_series_status(daily_results)
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert series is not None
+    series.wins = 3
+    series.losses = 3
+    series.status = final_status
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert refreshed.status == "lost"
+
+
+@pytest.mark.asyncio
+async def test_series_finalized_creates_row_when_missing(db_session):
+    """If no PlayoffSeries row exists for a week, finalization creates one."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # 4 wins, no pre-existing series record
+    daily_results = []
+    for i in range(4):
+        r = DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=True,
+            steph_complete=True,
+            won=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(r)
+        daily_results.append(r)
+    await db_session.commit()
+
+    wins = sum(1 for r in daily_results if r.won)
+    losses = sum(1 for r in daily_results if not r.won)
+    status = finalize_series_status(daily_results)
+
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=wins,
+            losses=losses,
+            status=status,
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert series is not None
+    assert series.wins == 4
+    assert series.losses == 0
+    assert series.status == "won"
+
+
+# ---------------------------------------------------------------------------
+# series_history per-person stats — grouping DailyResult by week
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_per_person_stats_correct(db_session):
+    """DailyResult rows grouped by week give correct per-person day counts."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # David: 5 days complete; Steph: 3 days complete; combined wins: 3
+    profiles = [
+        (True, True),   # Sun — both complete, win
+        (True, True),   # Mon — both complete, win
+        (True, True),   # Tue — both complete, win
+        (True, False),  # Wed — David only
+        (True, False),  # Thu — David only
+    ]
+    for i, (dc, sc) in enumerate(profiles):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=dc,
+                steph_complete=sc,
+                won=dc and sc,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    rows = (
+        await db_session.scalars(
+            select(DailyResult).where(DailyResult.guild_id == GUILD_ID)
+        )
+    ).all()
+
+    david_days = sum(1 for r in rows if r.david_complete)
+    steph_days = sum(1 for r in rows if r.steph_complete)
+    combined_wins = sum(1 for r in rows if r.won)
+
+    assert david_days == 5
+    assert steph_days == 3
+    assert combined_wins == 3
+
+
+@pytest.mark.asyncio
+async def test_history_multiple_weeks_grouped_correctly(db_session):
+    """DailyResult rows from two different weeks are grouped independently."""
+    week1 = SUNDAY_APR_19
+    week2 = SUNDAY_APR_19 + timedelta(weeks=1)  # Apr 26
+    now = datetime.now(timezone.utc)
+
+    # Week 1: 4 wins (David & Steph both complete all 4 days)
+    for i in range(4):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week1 + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    # Week 2: 2 wins (Steph missed 2 days)
+    for i in range(2):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week2 + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    for i in range(2, 4):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week2 + timedelta(days=i),
+                david_complete=True,
+                steph_complete=False,
+                won=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    all_rows = (
+        await db_session.scalars(
+            select(DailyResult).where(DailyResult.guild_id == GUILD_ID)
+        )
+    ).all()
+
+    # Group by week (mirror series_history logic)
+    daily_by_week: dict[date, list] = {}
+    for dr in all_rows:
+        ws = week_start_for(dr.result_date)
+        daily_by_week.setdefault(ws, []).append(dr)
+
+    w1_rows = daily_by_week[week1]
+    w2_rows = daily_by_week[week2]
+
+    assert sum(1 for r in w1_rows if r.david_complete) == 4
+    assert sum(1 for r in w1_rows if r.steph_complete) == 4
+    assert sum(1 for r in w2_rows if r.david_complete) == 4
+    assert sum(1 for r in w2_rows if r.steph_complete) == 2
 
 
 # ---------------------------------------------------------------------------
