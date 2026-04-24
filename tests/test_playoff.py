@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from src.cogs.playoff import get_pillar_names, series_message, week_start_for
+from src.cogs.playoff import format_weekly_summary, get_pillar_names, series_message, week_start_for
 from src.db import DailyResult, PlayoffCheckin, PlayoffSeries
 from src.utils import DAVID_ID, STEPH_ID
 
@@ -639,6 +639,154 @@ async def test_combined_win_requires_both_complete(db_session):
         assert row.won is expected_won, (
             f"dc={dc}, sc={sc}: expected won={expected_won}, got {row.won}"
         )
+
+
+# ---------------------------------------------------------------------------
+# format_weekly_summary — per-day breakdown, individual totals, streaks
+# ---------------------------------------------------------------------------
+
+WEEK_SUN = date(2026, 4, 19)  # Sunday — week of Apr 19–25
+
+
+def _make_result(
+    offset: int,
+    *,
+    david: bool,
+    steph: bool,
+    guild_id: int = GUILD_ID,
+) -> DailyResult:
+    """Create an unsaved DailyResult for day (WEEK_SUN + offset)."""
+    now = datetime.now(timezone.utc)
+    return DailyResult(
+        guild_id=guild_id,
+        result_date=WEEK_SUN + timedelta(days=offset),
+        david_complete=david,
+        steph_complete=steph,
+        won=david and steph,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_summary_no_data_shows_no_checkins():
+    msg = format_weekly_summary([], WEEK_SUN)
+    assert "No check-ins recorded" in msg
+
+
+def test_summary_no_data_still_has_reflection_prompt():
+    msg = format_weekly_summary([], WEEK_SUN)
+    assert "reflect" in msg.lower()
+
+
+def test_summary_counts_combined_wins():
+    results = [
+        _make_result(0, david=True, steph=True),   # Sun — win
+        _make_result(1, david=True, steph=False),  # Mon — loss
+        _make_result(2, david=True, steph=True),   # Tue — win
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "2/7" in msg  # combined wins
+    # Series result line
+    assert "2–1" in msg
+
+
+def test_summary_david_individual_count():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=False),
+        _make_result(2, david=False, steph=True),
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "David:** 2/7" in msg
+
+
+def test_summary_steph_individual_count():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=False),
+        _make_result(2, david=False, steph=True),
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "Steph:** 2/7" in msg
+
+
+def test_summary_per_day_win_label():
+    results = [_make_result(0, david=True, steph=True)]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "Win" in msg
+
+
+def test_summary_per_day_loss_label():
+    results = [_make_result(1, david=True, steph=False)]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "Loss" in msg
+
+
+def test_summary_days_without_result_show_dash():
+    """Days with no DailyResult row should show a dash, not win/loss."""
+    results = [_make_result(0, david=True, steph=True)]  # only Sunday logged
+    msg = format_weekly_summary(results, WEEK_SUN)
+    # Tue through Sat should show dashes (at least one "— " line)
+    assert "—" in msg
+
+
+def test_summary_streak_shown_when_two_or_more():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=True),
+        _make_result(2, david=False, steph=True),
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "streak" in msg.lower()
+    assert "2" in msg
+
+
+def test_summary_no_streak_line_for_single_win():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=False, steph=True),
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "streak" not in msg.lower()
+
+
+def test_summary_streak_uses_longest_not_last():
+    """Best streak should reflect the longest run, not the final sequence."""
+    results = [
+        _make_result(0, david=True, steph=True),   # win
+        _make_result(1, david=True, steph=True),   # win (streak=2)
+        _make_result(2, david=True, steph=True),   # win (streak=3)
+        _make_result(3, david=False, steph=True),  # loss
+        _make_result(4, david=True, steph=True),   # win (streak=1 reset)
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "3" in msg  # best streak is 3
+
+
+def test_summary_day_names_appear():
+    """Each day-of-week abbreviation for logged days should appear."""
+    results = [
+        _make_result(0, david=True, steph=True),   # Sun
+        _make_result(3, david=True, steph=True),   # Wed
+    ]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "Sun" in msg
+    assert "Wed" in msg
+
+
+def test_summary_perfect_week():
+    """All 7 days won — 7/7 should appear and streak=7."""
+    results = [_make_result(i, david=True, steph=True) for i in range(7)]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert "7/7" in msg
+    assert "7" in msg  # streak of 7
+
+
+def test_summary_under_discord_limit():
+    """Summary should not exceed Discord's 2000-character message limit."""
+    results = [_make_result(i, david=True, steph=True) for i in range(7)]
+    msg = format_weekly_summary(results, WEEK_SUN)
+    assert len(msg) <= 2000
 
 
 # ---------------------------------------------------------------------------
