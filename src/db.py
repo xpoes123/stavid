@@ -263,6 +263,79 @@ class SupplyCheckResult(Base):
     )
 
 
+class DateNightPlanner(Base):
+    """One row per guild — tracks who planned the last date night (next is their partner)."""
+
+    __tablename__ = "datenight_planner"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    last_planner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class DateNightWishlist(Base):
+    """Places and activities Stephanie and David want to try on a date night."""
+
+    __tablename__ = "datenight_wishlist"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    visited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    visited_at: Mapped[_dt.date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class DateNightLog(Base):
+    """Record of a completed date night."""
+
+    __tablename__ = "datenight_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    planned_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date: Mapped[_dt.date] = mapped_column(Date, nullable=False)
+    place: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1–5
+    wishlist_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class SpecialDate(Base):
+    """An anniversary, birthday, or other recurring special date."""
+
+    __tablename__ = "special_dates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    month: Mapped[int] = mapped_column(Integer, nullable=False)
+    day: Mapped[int] = mapped_column(Integer, nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)  # optional e.g. birth year
+    gift_ideas: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ShoppingItem(Base):
     __tablename__ = "shopping_items"
 
