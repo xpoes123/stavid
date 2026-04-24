@@ -361,6 +361,28 @@ class WatchlistItem(Base):
     )
 
 
+class BucketListItem(Base):
+    """A shared bucket list item for the couple."""
+
+    __tablename__ = "bucket_list_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False, default="other")  # travel/experience/food/adventure/creative/learning/other
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    link: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ShoppingItem(Base):
     __tablename__ = "shopping_items"
 
