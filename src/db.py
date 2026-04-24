@@ -336,6 +336,31 @@ class SpecialDate(Base):
     )
 
 
+class WatchlistItem(Base):
+    """A movie or show on the shared watchlist."""
+
+    __tablename__ = "watchlist_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(Text, nullable=False)  # "movie" or "show"
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    link: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    watched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    watched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    david_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1–5
+    steph_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1–5
+    david_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    steph_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ShoppingItem(Base):
     __tablename__ = "shopping_items"
 
