@@ -154,6 +154,22 @@ def format_weekly_summary(daily_results: list[DailyResult], week_start: date) ->
     return "\n".join(lines)
 
 
+class WeeklyReviewModal(discord.ui.Modal, title="Weekly Review"):
+    def __init__(self, callback) -> None:
+        super().__init__()
+        self._callback = callback
+        self.reflection = discord.ui.TextInput(
+            label="Reflection & next week focus",
+            placeholder="What went well? What to focus on next week?",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+        )
+        self.add_item(self.reflection)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self._callback(interaction, self.reflection.value)
+
+
 class CheckinModal(discord.ui.Modal, title="Daily Check-in"):
     def __init__(self, pillar_names: list[str], callback) -> None:
         super().__init__()
@@ -468,6 +484,7 @@ class Playoff(commands.Cog):
     )
     async def series_history(self, interaction: discord.Interaction) -> None:
         guild_id = interaction.guild_id or 0
+        today = today_et()
 
         async with self.bot.db() as s:
             rows = (
@@ -499,11 +516,26 @@ class Playoff(commands.Cog):
                 )
             ).all()
 
-        # Group DailyResult rows by the Sunday that started their week
-        daily_by_week: dict[date, list[DailyResult]] = {}
-        for dr in daily_rows:
-            ws = week_start_for(dr.result_date)
-            daily_by_week.setdefault(ws, []).append(dr)
+            # Group DailyResult rows by the Sunday that started their week
+            daily_by_week: dict[date, list[DailyResult]] = {}
+            for dr in daily_rows:
+                ws = week_start_for(dr.result_date)
+                daily_by_week.setdefault(ws, []).append(dr)
+
+            # Auto-heal stale "ongoing" status for fully completed past weeks.
+            # If the bot missed a Sunday review, old weeks stay "ongoing" forever
+            # unless we fix them here.
+            needs_commit = False
+            for row in rows:
+                week_end = row.week_start + timedelta(days=6)
+                if week_end < today and row.status == "ongoing":
+                    week_daily = daily_by_week.get(row.week_start, [])
+                    row.wins = sum(1 for dr in week_daily if dr.won)
+                    row.losses = sum(1 for dr in week_daily if not dr.won)
+                    row.status = finalize_series_status(week_daily)
+                    needs_commit = True
+            if needs_commit:
+                await s.commit()
 
         icons = {"won": "🏆", "lost": "💀", "ongoing": "🔄"}
         lines = []
@@ -526,6 +558,47 @@ class Playoff(commands.Cog):
         )
         embed.set_footer(text=f"Won {won_count} of {len(rows)} series shown")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="weekly_review",
+        description="Record your weekly reflection and goals",
+    )
+    async def weekly_review_cmd(self, interaction: discord.Interaction) -> None:
+        modal = WeeklyReviewModal(self._save_weekly_review)
+        await interaction.response.send_modal(modal)
+
+    async def _save_weekly_review(
+        self, interaction: discord.Interaction, text: str
+    ) -> None:
+        week_of = week_start_for(today_et())
+        guild_id = interaction.guild_id or 0
+        user_id = interaction.user.id
+
+        async with self.bot.db() as s:
+            existing = await s.scalar(
+                select(WeeklyReview).where(
+                    WeeklyReview.guild_id == guild_id,
+                    WeeklyReview.user_id == user_id,
+                    WeeklyReview.week_of == week_of,
+                )
+            )
+            if existing:
+                existing.review_text = text
+            else:
+                s.add(
+                    WeeklyReview(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        week_of=week_of,
+                        review_text=text,
+                    )
+                )
+            await s.commit()
+
+        await interaction.response.send_message(
+            f"✅ Reflection saved for the week of {week_of.strftime('%b %d')}!",
+            ephemeral=True,
+        )
 
     # ------------------------------------------------------------------ #
     # Background tasks                                                     #

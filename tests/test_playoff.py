@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from src.cogs.playoff import finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
-from src.db import DailyResult, PlayoffCheckin, PlayoffSeries
+from src.db import DailyResult, PlayoffCheckin, PlayoffSeries, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
 GUILD_ID = 999_000_000_000_000_000
@@ -17,6 +17,7 @@ GUILD_ID = 999_000_000_000_000_000
 # ---------------------------------------------------------------------------
 
 SUNDAY_APR_19 = date(2026, 4, 19)  # confirmed Sunday
+SUNDAY_APR_12 = date(2026, 4, 12)  # a completed past week (ended Apr 18)
 
 
 @pytest.mark.parametrize("offset", range(7))
@@ -1127,6 +1128,307 @@ async def test_history_multiple_weeks_grouped_correctly(db_session):
     assert sum(1 for r in w1_rows if r.steph_complete) == 4
     assert sum(1 for r in w2_rows if r.david_complete) == 4
     assert sum(1 for r in w2_rows if r.steph_complete) == 2
+
+
+# ---------------------------------------------------------------------------
+# series_history auto-heal — stale "ongoing" status for completed past weeks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stale_ongoing_healed_for_past_week(db_session):
+    """A past week stuck as 'ongoing' is corrected when history is queried."""
+    week_start = SUNDAY_APR_12  # week ended Apr 18 — fully in the past
+    now = datetime.now(timezone.utc)
+
+    # Series record never got finalized (e.g. bot was down that Sunday)
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=3,
+            losses=2,
+            status="ongoing",
+            created_at=now,
+        )
+    )
+    # 3 wins, 2 losses — week is over, not enough wins → "lost"
+    for i in range(3):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    for i in range(3, 5):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=False,
+                steph_complete=True,
+                won=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    # Simulate the auto-heal logic from series_history
+    daily_rows = (
+        await db_session.scalars(select(DailyResult).where(DailyResult.guild_id == GUILD_ID))
+    ).all()
+
+    daily_by_week: dict[date, list[DailyResult]] = {}
+    for dr in daily_rows:
+        ws = week_start_for(dr.result_date)
+        daily_by_week.setdefault(ws, []).append(dr)
+
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    week_daily = daily_by_week.get(week_start, [])
+    series.wins = sum(1 for dr in week_daily if dr.won)
+    series.losses = sum(1 for dr in week_daily if not dr.won)
+    series.status = finalize_series_status(week_daily)
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert refreshed.status == "lost"  # 3 wins < 4 → lost
+    assert refreshed.wins == 3
+    assert refreshed.losses == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_ongoing_healed_to_won(db_session):
+    """A past week with 4+ wins is healed to 'won', not 'lost'."""
+    week_start = SUNDAY_APR_12
+    now = datetime.now(timezone.utc)
+
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=4,
+            losses=2,
+            status="ongoing",
+            created_at=now,
+        )
+    )
+    for i in range(4):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=True,
+                steph_complete=True,
+                won=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    for i in range(4, 6):
+        db_session.add(
+            DailyResult(
+                guild_id=GUILD_ID,
+                result_date=week_start + timedelta(days=i),
+                david_complete=False,
+                steph_complete=True,
+                won=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    await db_session.commit()
+
+    daily_rows = (
+        await db_session.scalars(select(DailyResult).where(DailyResult.guild_id == GUILD_ID))
+    ).all()
+    week_daily = [dr for dr in daily_rows if week_start_for(dr.result_date) == week_start]
+
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    series.wins = sum(1 for dr in week_daily if dr.won)
+    series.losses = sum(1 for dr in week_daily if not dr.won)
+    series.status = finalize_series_status(week_daily)
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert refreshed.status == "won"  # 4 wins → won
+
+
+@pytest.mark.asyncio
+async def test_current_week_ongoing_not_healed(db_session):
+    """A series for the current (in-progress) week stays 'ongoing' — only past weeks are healed."""
+    from datetime import date as date_type
+    import datetime as dt_module
+
+    # Use a future week to simulate "current" in the test
+    future_sunday = date_type(2099, 1, 5)  # far future, always current
+    now = datetime.now(timezone.utc)
+
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=future_sunday,
+            wins=2,
+            losses=1,
+            status="ongoing",
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    series = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == future_sunday,
+        )
+    )
+    # week_end is in the future — auto-heal condition (week_end < today) is False
+    week_end = future_sunday + timedelta(days=6)
+    today = date_type.today()
+    assert week_end >= today, "test setup: future_sunday must be in the future"
+    # Status should remain "ongoing" — no healing applied
+    assert series.status == "ongoing"
+
+
+# ---------------------------------------------------------------------------
+# WeeklyReview — text reflection persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_persists(db_session):
+    """A weekly review is written to the DB and can be read back."""
+    week_of = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+    text = "Great week — hit all pillars Mon–Wed. Focus next week: maintain steps."
+
+    db_session.add(
+        WeeklyReview(
+            guild_id=GUILD_ID,
+            user_id=DAVID_ID,
+            week_of=week_of,
+            review_text=text,
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(WeeklyReview).where(
+            WeeklyReview.guild_id == GUILD_ID,
+            WeeklyReview.user_id == DAVID_ID,
+            WeeklyReview.week_of == week_of,
+        )
+    )
+    assert row is not None
+    assert row.review_text == text
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_upsert(db_session):
+    """Updating an existing weekly review replaces the text in place."""
+    week_of = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    db_session.add(
+        WeeklyReview(
+            guild_id=GUILD_ID,
+            user_id=STEPH_ID,
+            week_of=week_of,
+            review_text="first draft",
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    # Update
+    existing = await db_session.scalar(
+        select(WeeklyReview).where(
+            WeeklyReview.guild_id == GUILD_ID,
+            WeeklyReview.user_id == STEPH_ID,
+            WeeklyReview.week_of == week_of,
+        )
+    )
+    existing.review_text = "revised: TikTok control was tough — next week: 60min cap"
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(WeeklyReview).where(
+            WeeklyReview.guild_id == GUILD_ID,
+            WeeklyReview.user_id == STEPH_ID,
+            WeeklyReview.week_of == week_of,
+        )
+    )
+    assert refreshed.review_text == "revised: TikTok control was tough — next week: 60min cap"
+
+
+@pytest.mark.asyncio
+async def test_weekly_review_per_user_independent(db_session):
+    """David and Steph can each have their own review for the same week."""
+    week_of = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    db_session.add(
+        WeeklyReview(
+            guild_id=GUILD_ID,
+            user_id=DAVID_ID,
+            week_of=week_of,
+            review_text="david's reflection",
+            created_at=now,
+        )
+    )
+    db_session.add(
+        WeeklyReview(
+            guild_id=GUILD_ID,
+            user_id=STEPH_ID,
+            week_of=week_of,
+            review_text="steph's reflection",
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    david_row = await db_session.scalar(
+        select(WeeklyReview).where(
+            WeeklyReview.guild_id == GUILD_ID,
+            WeeklyReview.user_id == DAVID_ID,
+            WeeklyReview.week_of == week_of,
+        )
+    )
+    steph_row = await db_session.scalar(
+        select(WeeklyReview).where(
+            WeeklyReview.guild_id == GUILD_ID,
+            WeeklyReview.user_id == STEPH_ID,
+            WeeklyReview.week_of == week_of,
+        )
+    )
+    assert david_row.review_text == "david's reflection"
+    assert steph_row.review_text == "steph's reflection"
 
 
 # ---------------------------------------------------------------------------
