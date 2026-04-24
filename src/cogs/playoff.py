@@ -73,6 +73,76 @@ def series_message(wins: int, losses: int) -> str:
     return f"⚖️ Tied {wins}–{losses} — anyone's series. Need {wins_needed} more."
 
 
+_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+
+def format_weekly_summary(daily_results: list[DailyResult], week_start: date) -> str:
+    """Build a detailed weekly summary string from DailyResult rows.
+
+    Args:
+        daily_results: All DailyResult rows for the given week (any order).
+        week_start: The Sunday that starts the week.
+    """
+    by_date = {r.result_date: r for r in daily_results}
+    week_dates = [week_start + timedelta(days=i) for i in range(7)]
+
+    david_days = sum(1 for r in daily_results if r.david_complete)
+    steph_days = sum(1 for r in daily_results if r.steph_complete)
+    combined_wins = sum(1 for r in daily_results if r.won)
+    total_played = len(daily_results)
+
+    # Build per-day lines and win sequence for streak calculation
+    day_lines: list[str] = []
+    win_sequence: list[bool] = []
+    for i, d in enumerate(week_dates):
+        label = f"{_DAY_NAMES[i]} {d.strftime('%m/%d')}"
+        if d in by_date:
+            r = by_date[d]
+            d_icon = "✅" if r.david_complete else "❌"
+            s_icon = "✅" if r.steph_complete else "❌"
+            result_label = "🏆 Win" if r.won else "💔 Loss"
+            day_lines.append(f"`{label}`  D:{d_icon} S:{s_icon} → {result_label}")
+            win_sequence.append(r.won)
+        else:
+            day_lines.append(f"`{label}`  —")
+            win_sequence.append(False)
+
+    # Longest consecutive-win streak within the week
+    max_streak = cur_streak = 0
+    for w in win_sequence:
+        if w:
+            cur_streak += 1
+            max_streak = max(max_streak, cur_streak)
+        else:
+            cur_streak = 0
+
+    lines: list[str] = ["☀️ **Sunday Weekly Review**\n"]
+
+    if total_played == 0:
+        lines.append("No check-ins recorded for last week.")
+    else:
+        lines.append(f"**Series result: {combined_wins}–{total_played - combined_wins}**")
+        lines.append("")
+        lines.append("**Day-by-day breakdown:**")
+        lines.extend(day_lines)
+        lines.append("")
+        lines.append(f"**David:** {david_days}/7 days complete")
+        lines.append(f"**Steph:** {steph_days}/7 days complete")
+        lines.append(f"**Combined wins:** {combined_wins}/7 days")
+        if max_streak >= 2:
+            lines.append(f"**Best streak this week:** {max_streak} days in a row 🔥")
+
+    lines += [
+        "",
+        "Take a moment to reflect:",
+        "• What went well this week?",
+        "• What do you want to focus on next week?",
+        "",
+        "New series starts today — fresh slate. You've got this! 💪",
+    ]
+    return "\n".join(lines)
+
+
 class CheckinModal(discord.ui.Modal, title="Daily Check-in"):
     def __init__(self, pillar_names: list[str], callback) -> None:
         super().__init__()
@@ -486,31 +556,26 @@ class Playoff(commands.Cog):
             return
 
         prev_week_start = week_start_for(today) - timedelta(weeks=1)
-
         guild_id = channel.guild.id if channel.guild else 0
-        lines = ["☀️ **Sunday Weekly Review**\n"]
-        async with self.bot.db() as s:
-            series = await s.scalar(
-                select(PlayoffSeries).where(
-                    PlayoffSeries.guild_id == guild_id,
-                    PlayoffSeries.week_start == prev_week_start,
-                )
-            )
-            if series:
-                result = f"**{series.wins}–{series.losses}** ({series.status})"
-            else:
-                result = "No data"
-            lines.append(f"Last week's series: {result}")
 
-        lines += [
-            "",
-            "Take a moment to reflect:",
-            "• What went well this week?",
-            "• What do you want to focus on next week?",
-            "",
-            "New series starts today — fresh slate. You've got this! 💪",
-        ]
-        await channel.send("\n".join(lines))
+        async with self.bot.db() as s:
+            rows = list(
+                (
+                    await s.execute(
+                        select(DailyResult).where(
+                            DailyResult.guild_id == guild_id,
+                            DailyResult.result_date >= prev_week_start,
+                            DailyResult.result_date
+                            <= prev_week_start + timedelta(days=6),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        summary = format_weekly_summary(rows, prev_week_start)
+        await channel.send(summary)
 
     @sunday_review.before_loop
     async def before_sunday_review(self) -> None:
