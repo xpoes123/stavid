@@ -263,6 +263,23 @@ class SupplyCheckResult(Base):
     )
 
 
+class ShoppingItem(Base):
+    __tablename__ = "shopping_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)  # Discord user ID
+    bought: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 # -----------------------------------------------------------------------------
 # Engine / Session
 # -----------------------------------------------------------------------------
