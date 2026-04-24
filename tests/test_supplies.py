@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import select
 
-from src.cogs.supplies import _this_sunday
+from src.cogs.supplies import _this_sunday, seed_supply_items
 from src.db import SupplyCheckResult, SupplyItem
 
 GUILD_ID = 999_000_000_000_000_001
@@ -208,3 +208,63 @@ async def test_inactive_items_excluded_from_active_list(db_session):
     )
     assert len(rows) == 1
     assert rows[0].name == "Active item"
+
+
+# ---------------------------------------------------------------------------
+# seed_supply_items
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_seed_inserts_new_items(db_session):
+    count = await seed_supply_items(db_session, GUILD_ID, ["Toothpaste", "Dish soap", "Trash bags"])
+    assert count == 3
+
+    rows = list(
+        (
+            await db_session.scalars(
+                select(SupplyItem).where(
+                    SupplyItem.guild_id == GUILD_ID,
+                    SupplyItem.active.is_(True),
+                )
+            )
+        ).all()
+    )
+    assert {r.name for r in rows} == {"Toothpaste", "Dish soap", "Trash bags"}
+
+
+@pytest.mark.asyncio
+async def test_seed_skips_existing_active_items(db_session):
+    db_session.add(SupplyItem(guild_id=GUILD_ID, name="Toothpaste", active=True))
+    await db_session.commit()
+
+    count = await seed_supply_items(db_session, GUILD_ID, ["Toothpaste", "Dish soap"])
+    assert count == 1  # only Dish soap is new
+
+    rows = list(
+        (
+            await db_session.scalars(
+                select(SupplyItem).where(SupplyItem.guild_id == GUILD_ID)
+            )
+        ).all()
+    )
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_seed_skips_soft_deleted_items(db_session):
+    """Seeder does not re-activate items the user intentionally removed."""
+    db_session.add(SupplyItem(guild_id=GUILD_ID, name="Sunscreen", active=False))
+    await db_session.commit()
+
+    count = await seed_supply_items(db_session, GUILD_ID, ["Sunscreen", "Toothpaste"])
+    assert count == 1  # only Toothpaste is genuinely new
+
+    row = await db_session.scalar(
+        select(SupplyItem).where(
+            SupplyItem.guild_id == GUILD_ID,
+            SupplyItem.name == "Sunscreen",
+        )
+    )
+    assert row is not None
+    assert row.active is False  # still inactive
