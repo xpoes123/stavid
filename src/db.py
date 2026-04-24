@@ -383,6 +383,30 @@ class BucketListItem(Base):
     )
 
 
+class OutingWishlistItem(Base):
+    """A shared wishlist of restaurants and activities to try."""
+
+    __tablename__ = "outing_wishlist_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False, default="other")
+    budget: Mapped[str] = mapped_column(Text, nullable=False, default="")  # "", "budget", "moderate", "splurge"
+    neighborhood: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    link: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    added_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    visited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    visited_at: Mapped[_dt.date | None] = mapped_column(Date, nullable=True)
+    visited_notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class ShoppingItem(Base):
     __tablename__ = "shopping_items"
 
