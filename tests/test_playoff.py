@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from src.cogs.playoff import finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
+from src.cogs.playoff import build_weekly_embed, finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
 from src.db import DailyResult, PlayoffCheckin, PlayoffSeries, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
@@ -1494,6 +1494,124 @@ async def test_weekly_review_per_user_independent(db_session):
     )
     assert david_row.review_text == "david's reflection"
     assert steph_row.review_text == "steph's reflection"
+
+
+# ---------------------------------------------------------------------------
+# build_weekly_embed — rich Discord embed with per-pillar breakdown
+# ---------------------------------------------------------------------------
+
+
+def _make_checkin(
+    user_id: int,
+    offset: int,
+    *,
+    p1: bool = True,
+    p2: bool = True,
+    p3: bool = True,
+) -> PlayoffCheckin:
+    """Create an unsaved PlayoffCheckin for testing."""
+    now = datetime.now(timezone.utc)
+    return PlayoffCheckin(
+        guild_id=GUILD_ID,
+        user_id=user_id,
+        checkin_date=WEEK_SUN + timedelta(days=offset),
+        pillar1=p1,
+        pillar2=p2,
+        pillar3=p3,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_embed_no_data_has_no_checkin_message():
+    embed = build_weekly_embed([], WEEK_SUN)
+    assert "No check-ins recorded" in (embed.description or "")
+
+
+def test_embed_won_series_is_green():
+    import discord as _discord
+    results = [_make_result(i, david=True, steph=True) for i in range(4)]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    assert embed.color == _discord.Color.green()
+
+
+def test_embed_lost_series_is_red():
+    import discord as _discord
+    results = [_make_result(i, david=False, steph=True) for i in range(7)]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    assert embed.color == _discord.Color.red()
+
+
+def test_embed_title_contains_week_dates():
+    embed = build_weekly_embed([], WEEK_SUN)
+    assert "Apr 19" in embed.title
+    assert "Apr 25" in embed.title
+
+
+def test_embed_day_by_day_field_present():
+    results = [_make_result(0, david=True, steph=True)]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    field_names = [f.name for f in embed.fields]
+    assert any("Day" in name for name in field_names)
+
+
+def test_embed_per_pillar_stats_with_checkin_rows():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=False),
+    ]
+    checkins = [
+        _make_checkin(DAVID_ID, 0, p1=True, p2=True, p3=True),
+        _make_checkin(DAVID_ID, 1, p1=True, p2=True, p3=True),
+        _make_checkin(STEPH_ID, 0, p1=True, p2=True, p3=True),
+        _make_checkin(STEPH_ID, 1, p1=False, p2=True, p3=True),
+    ]
+    embed = build_weekly_embed(results, WEEK_SUN, checkins)
+    # David field should show 2/2 for all pillars
+    david_field = next(f for f in embed.fields if "David" in f.name)
+    assert "2/2" in david_field.value
+    # Steph field should show 1/2 for pillar1
+    steph_field = next(f for f in embed.fields if "Steph" in f.name)
+    assert "1/2" in steph_field.value
+
+
+def test_embed_no_checkin_rows_still_shows_day_counts():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=False),
+    ]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    david_field = next(f for f in embed.fields if "David" in f.name)
+    assert "2/7" in david_field.value
+    steph_field = next(f for f in embed.fields if "Steph" in f.name)
+    assert "1/7" in steph_field.value
+
+
+def test_embed_streak_field_shown_when_two_wins():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=True),
+        _make_result(2, david=False, steph=True),
+    ]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    field_names = [f.name for f in embed.fields]
+    assert any("Streak" in name for name in field_names)
+
+
+def test_embed_no_streak_field_for_single_win():
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=False, steph=True),
+    ]
+    embed = build_weekly_embed(results, WEEK_SUN)
+    field_names = [f.name for f in embed.fields]
+    assert not any("Streak" in name for name in field_names)
+
+
+def test_embed_footer_mentions_weekly_review():
+    embed = build_weekly_embed([], WEEK_SUN)
+    assert embed.footer is not None
+    assert "weekly_review" in embed.footer.text.lower() or "weekly_review" in (embed.footer.text or "")
 
 
 # ---------------------------------------------------------------------------

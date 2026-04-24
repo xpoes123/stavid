@@ -154,6 +154,118 @@ def format_weekly_summary(daily_results: list[DailyResult], week_start: date) ->
     return "\n".join(lines)
 
 
+def build_weekly_embed(
+    daily_results: list[DailyResult],
+    week_start: date,
+    checkin_rows: list[PlayoffCheckin] | None = None,
+) -> discord.Embed:
+    """Build a rich Discord embed for the Sunday weekly review.
+
+    Args:
+        daily_results: All DailyResult rows for the week (any order).
+        week_start: The Sunday that starts the week.
+        checkin_rows: Optional PlayoffCheckin rows for the week — used to
+            compute per-pillar completion rates per person.
+    """
+    by_date = {r.result_date: r for r in daily_results}
+    week_dates = [week_start + timedelta(days=i) for i in range(7)]
+
+    david_days = sum(1 for r in daily_results if r.david_complete)
+    steph_days = sum(1 for r in daily_results if r.steph_complete)
+    combined_wins = sum(1 for r in daily_results if r.won)
+    total_played = len(daily_results)
+
+    # Series status colour
+    final_status = finalize_series_status(daily_results) if daily_results else "lost"
+    if final_status == "won":
+        color = discord.Color.green()
+        status_line = f"🏆 **{combined_wins}–{total_played - combined_wins} — WON!**"
+    elif final_status == "lost":
+        color = discord.Color.red()
+        status_line = f"💀 **{combined_wins}–{total_played - combined_wins} — Lost**"
+    else:
+        color = discord.Color.blurple()
+        status_line = f"🔄 **{combined_wins}–{total_played - combined_wins} — Ongoing**"
+
+    week_end = week_start + timedelta(days=6)
+    embed = discord.Embed(
+        title=f"☀️ Sunday Weekly Review — {week_start.strftime('%b %d')}–{week_end.strftime('%b %d')}",
+        color=color,
+    )
+
+    if total_played == 0:
+        embed.description = "No check-ins recorded for last week."
+    else:
+        embed.description = status_line
+
+    # Day-by-day breakdown
+    day_lines: list[str] = []
+    win_sequence: list[bool] = []
+    for i, d in enumerate(week_dates):
+        label = f"{_DAY_NAMES[i]} {d.strftime('%m/%d')}"
+        if d in by_date:
+            r = by_date[d]
+            d_icon = "✅" if r.david_complete else "❌"
+            s_icon = "✅" if r.steph_complete else "❌"
+            result_label = "🏆" if r.won else "💔"
+            day_lines.append(f"`{label}` D:{d_icon} S:{s_icon} {result_label}")
+            win_sequence.append(r.won)
+        else:
+            day_lines.append(f"`{label}` —")
+            win_sequence.append(False)
+
+    if day_lines:
+        embed.add_field(name="Day-by-Day", value="\n".join(day_lines), inline=False)
+
+    # Best streak
+    max_streak = cur_streak = 0
+    for w in win_sequence:
+        if w:
+            cur_streak += 1
+            max_streak = max(max_streak, cur_streak)
+        else:
+            cur_streak = 0
+
+    # Per-person summaries (with optional per-pillar breakdown)
+    checkins = checkin_rows or []
+    david_checkins = [r for r in checkins if r.user_id == DAVID_ID]
+    steph_checkins = [r for r in checkins if r.user_id == STEPH_ID]
+
+    def _pillar_lines(user_checkins: list[PlayoffCheckin], pillars: list[str]) -> str:
+        total = len(user_checkins)
+        denom = total if total else 7
+        p_counts = [
+            sum(1 for r in user_checkins if getattr(r, f"pillar{j + 1}"))
+            for j in range(3)
+        ]
+        lines = [f"{'✅' if p_counts[j] == denom else '🔸'} {pillars[j][:40]}: {p_counts[j]}/{denom}" for j in range(3)]
+        return "\n".join(lines)
+
+    david_header = f"**David — {david_days}/7 days complete**"
+    if david_checkins:
+        david_body = _pillar_lines(david_checkins, DAVID_PILLARS)
+        embed.add_field(name=david_header, value=david_body, inline=True)
+    else:
+        embed.add_field(name=david_header, value=f"Days complete: {david_days}/7", inline=True)
+
+    steph_header = f"**Steph — {steph_days}/7 days complete**"
+    if steph_checkins:
+        steph_body = _pillar_lines(steph_checkins, STEPH_PILLARS)
+        embed.add_field(name=steph_header, value=steph_body, inline=True)
+    else:
+        embed.add_field(name=steph_header, value=f"Days complete: {steph_days}/7", inline=True)
+
+    if max_streak >= 2:
+        embed.add_field(
+            name="Best Streak",
+            value=f"🔥 {max_streak} days in a row!",
+            inline=False,
+        )
+
+    embed.set_footer(text="Use /weekly_review to share your reflection • New series starts today — fresh slate! 💪")
+    return embed
+
+
 class WeeklyReviewModal(discord.ui.Modal, title="Weekly Review"):
     def __init__(self, callback) -> None:
         super().__init__()
@@ -713,8 +825,24 @@ class Playoff(commands.Cog):
                     )
                 await s.commit()
 
-        summary = format_weekly_summary(rows, prev_week_start)
-        await channel.send(summary)
+            # Fetch per-person checkin rows for the detailed pillar breakdown
+            checkin_rows = list(
+                (
+                    await s.execute(
+                        select(PlayoffCheckin).where(
+                            PlayoffCheckin.guild_id == guild_id,
+                            PlayoffCheckin.checkin_date >= prev_week_start,
+                            PlayoffCheckin.checkin_date
+                            <= prev_week_start + timedelta(days=6),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        embed = build_weekly_embed(rows, prev_week_start, checkin_rows)
+        await channel.send(embed=embed)
 
     @sunday_review.before_loop
     async def before_sunday_review(self) -> None:
