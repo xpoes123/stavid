@@ -396,6 +396,7 @@ class Playoff(commands.Cog):
             )
 
             today_result: DailyResult | None = None
+            is_new_settlement = False
             if david_checkin and steph_checkin:
                 david_complete = (
                     david_checkin.pillar1 and david_checkin.pillar2 and david_checkin.pillar3
@@ -411,6 +412,7 @@ class Playoff(commands.Cog):
                         DailyResult.result_date == today,
                     )
                 )
+                is_new_settlement = existing_result is None
                 if existing_result:
                     existing_result.david_complete = david_complete
                     existing_result.steph_complete = steph_complete
@@ -473,14 +475,24 @@ class Playoff(commands.Cog):
             await s.commit()
 
         # --- Build response embed ---
-        individual_label = "✅ WIN" if individual_win else "❌ LOSS"
+        # Combined result is the headline — a day only wins if BOTH complete everything.
+        # Individual completion is shown as context, not as the win/loss verdict.
         if today_result is not None:
-            color = discord.Color.green() if today_result.won else discord.Color.red()
+            if today_result.won:
+                headline = "🏆 Day Win"
+                color = discord.Color.green()
+            else:
+                headline = "💔 Day Loss"
+                color = discord.Color.red()
         else:
+            headline = "⏳ Waiting for partner"
             color = discord.Color.blurple()
 
+        your_day = "✅ Your pillars: complete" if individual_win else "❌ Your pillars: incomplete"
+
         embed = discord.Embed(
-            title=f"{individual_label} — {today.strftime('%A, %b %d')}",
+            title=f"{headline} — {today.strftime('%A, %b %d')}",
+            description=your_day,
             color=color,
         )
         embed.add_field(
@@ -495,16 +507,16 @@ class Playoff(commands.Cog):
         # Combined result — only available once both players have checked in
         if today_result is not None:
             if today_result.won:
-                combined_text = "🏆 **Shared WIN** — both complete!"
+                combined_text = "Both complete — you won the day together!"
             else:
                 missed = []
                 if not today_result.david_complete:
                     missed.append("David")
                 if not today_result.steph_complete:
                     missed.append("Stephanie")
-                combined_text = f"💀 **Shared LOSS** — {', '.join(missed)} didn't complete all pillars"
+                combined_text = f"{', '.join(missed)} didn't complete all pillars"
         else:
-            combined_text = "⏳ Waiting for other player to check in..."
+            combined_text = "Waiting for other player to check in..."
 
         embed.add_field(name="Combined Result", value=combined_text, inline=False)
         embed.add_field(
@@ -513,6 +525,28 @@ class Playoff(commands.Cog):
             inline=False,
         )
         await interaction.response.send_message(embed=embed)
+
+        # Cross-notify the other player when the day is first settled, so they
+        # don't have to manually check /playoff_status to see the combined result.
+        if is_new_settlement and today_result is not None:
+            other_id = STEPH_ID if user_id == DAVID_ID else DAVID_ID
+            if today_result.won:
+                notif = (
+                    f"<@{other_id}> 🏆 Day settled — **both complete!** "
+                    f"Series: **{wins}W {losses}L**"
+                )
+            else:
+                missed = []
+                if not today_result.david_complete:
+                    missed.append("David")
+                if not today_result.steph_complete:
+                    missed.append("Stephanie")
+                notif = (
+                    f"<@{other_id}> 💔 Day settled — "
+                    f"{', '.join(missed)} didn't complete all pillars. "
+                    f"Series: **{wins}W {losses}L**"
+                )
+            await interaction.followup.send(notif)
 
     @app_commands.command(
         name="playoff_status",
