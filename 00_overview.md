@@ -27,3 +27,4 @@ A week is a best-of-7 playoff series. You need 4 wins to advance. You can't be e
 - `01_win_conditions.md` — each person's 3 pillars
 - `02_system_design.md` — Discord bot behavior, weekly rhythm, incentives
 - `03_open_questions.md` — things still to be decided
+wa3
