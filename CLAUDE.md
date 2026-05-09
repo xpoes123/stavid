@@ -80,7 +80,7 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | `/help`, `/wifi` | Done |
 | `/venmo`, `/pay`, `/rent`, `/wifi_bill`, `/ledger` | Done |
 | `/remind`, `/reminders`, `/reset_reminders` | Stubbed — not implemented |
-| Playoff Week habit tracker | Built — daily check-ins, series scoring, Sunday weekly review with per-pillar breakdown and recent series history (see `playoff.py`) |
+| Playoff Week habit tracker | Built — daily check-ins, series scoring, Sunday weekly review with per-pillar breakdown and recent series history; per-person days, per-pillar counts, and best-streak stats persisted on `PlayoffSeries` and back-filled for pre-migration rows (see `playoff.py`) |
 
 ## Active Design Docs
 - [00_overview.md](00_overview.md) — Playoff Week concept and user profiles
