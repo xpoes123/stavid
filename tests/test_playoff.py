@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from src.cogs.playoff import build_weekly_embed, finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
+from src.cogs.playoff import _compute_weekly_stats, build_weekly_embed, finalize_series_status, format_weekly_summary, get_pillar_names, series_message, week_start_for
 from src.db import DailyResult, PlayoffCheckin, PlayoffSeries, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
@@ -1688,6 +1688,366 @@ def test_embed_history_sorted_newest_first():
     newer_label = newer.strftime("%b %d")
     older_label = older.strftime("%b %d")
     assert record_field.value.index(newer_label) < record_field.value.index(older_label)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _compute_weekly_stats — per-person, per-pillar, streak computation
+# ---------------------------------------------------------------------------
+
+
+def _make_full_checkin(user_id: int, offset: int, *, p1: bool, p2: bool, p3: bool) -> PlayoffCheckin:
+    now = datetime.now(timezone.utc)
+    return PlayoffCheckin(
+        guild_id=GUILD_ID,
+        user_id=user_id,
+        checkin_date=WEEK_SUN + timedelta(days=offset),
+        pillar1=p1,
+        pillar2=p2,
+        pillar3=p3,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_compute_weekly_stats_per_person_days():
+    """david_days and steph_days reflect how many days each person was complete."""
+    results = [
+        _make_result(0, david=True, steph=True),   # both complete
+        _make_result(1, david=True, steph=False),  # only David
+        _make_result(2, david=False, steph=True),  # only Steph
+    ]
+    checkins = [
+        _make_full_checkin(DAVID_ID, 0, p1=True, p2=True, p3=True),
+        _make_full_checkin(DAVID_ID, 1, p1=True, p2=True, p3=True),
+        _make_full_checkin(DAVID_ID, 2, p1=False, p2=True, p3=True),
+        _make_full_checkin(STEPH_ID, 0, p1=True, p2=True, p3=True),
+        _make_full_checkin(STEPH_ID, 1, p1=False, p2=True, p3=True),
+        _make_full_checkin(STEPH_ID, 2, p1=True, p2=True, p3=True),
+    ]
+    stats = _compute_weekly_stats(results, checkins, WEEK_SUN)
+    assert stats["david_days"] == 2
+    assert stats["steph_days"] == 2
+
+
+def test_compute_weekly_stats_per_pillar_counts():
+    """Per-pillar counts reflect how many times each pillar was completed."""
+    results = [
+        _make_result(0, david=True, steph=True),
+        _make_result(1, david=True, steph=False),
+    ]
+    # David: p1 both days, p2 both days, p3 only day 0
+    # Steph: p1 only day 0, p2 both days, p3 only day 0
+    checkins = [
+        _make_full_checkin(DAVID_ID, 0, p1=True, p2=True, p3=True),
+        _make_full_checkin(DAVID_ID, 1, p1=True, p2=True, p3=False),
+        _make_full_checkin(STEPH_ID, 0, p1=True, p2=True, p3=True),
+        _make_full_checkin(STEPH_ID, 1, p1=False, p2=True, p3=False),
+    ]
+    stats = _compute_weekly_stats(results, checkins, WEEK_SUN)
+    assert stats["david_p1"] == 2
+    assert stats["david_p2"] == 2
+    assert stats["david_p3"] == 1
+    assert stats["steph_p1"] == 1
+    assert stats["steph_p2"] == 2
+    assert stats["steph_p3"] == 1
+
+
+def test_compute_weekly_stats_best_streak():
+    """best_streak is the longest consecutive combined-win run across all 7 days."""
+    results = [
+        _make_result(0, david=True, steph=True),   # Sun — win  (streak=1)
+        _make_result(1, david=True, steph=True),   # Mon — win  (streak=2)
+        _make_result(2, david=True, steph=True),   # Tue — win  (streak=3)
+        _make_result(3, david=False, steph=True),  # Wed — loss (streak reset)
+        _make_result(4, david=True, steph=True),   # Thu — win  (streak=1)
+    ]
+    stats = _compute_weekly_stats(results, [], WEEK_SUN)
+    assert stats["best_streak"] == 3
+
+
+def test_compute_weekly_stats_unsettled_days_break_streak():
+    """Days with no DailyResult count as losses for streak purposes."""
+    results = [
+        _make_result(0, david=True, steph=True),   # Sun — win
+        # Mon (offset 1) — no result, treated as non-win
+        _make_result(2, david=True, steph=True),   # Tue — win
+        _make_result(3, david=True, steph=True),   # Wed — win
+    ]
+    stats = _compute_weekly_stats(results, [], WEEK_SUN)
+    # Streak of 2 (Tue+Wed), not 3 (Mon gap breaks it)
+    assert stats["best_streak"] == 2
+
+
+def test_compute_weekly_stats_no_data():
+    """Empty week returns all zeros."""
+    stats = _compute_weekly_stats([], [], WEEK_SUN)
+    assert stats["david_days"] == 0
+    assert stats["steph_days"] == 0
+    assert stats["david_p1"] == 0
+    assert stats["steph_p3"] == 0
+    assert stats["best_streak"] == 0
+
+
+def test_compute_weekly_stats_perfect_week():
+    """All 7 days won — streak=7 and days=7 for both players."""
+    results = [_make_result(i, david=True, steph=True) for i in range(7)]
+    checkins = [
+        _make_full_checkin(uid, i, p1=True, p2=True, p3=True)
+        for i in range(7)
+        for uid in (DAVID_ID, STEPH_ID)
+    ]
+    stats = _compute_weekly_stats(results, checkins, WEEK_SUN)
+    assert stats["david_days"] == 7
+    assert stats["steph_days"] == 7
+    assert stats["david_p1"] == 7
+    assert stats["steph_p3"] == 7
+    assert stats["best_streak"] == 7
+
+
+# ---------------------------------------------------------------------------
+# DB persistence — PlayoffSeries weekly stats columns
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_series_stats_persisted(db_session):
+    """New stat columns on PlayoffSeries survive a round-trip to the DB."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=SUNDAY_APR_19,
+            wins=5,
+            losses=2,
+            status="won",
+            created_at=now,
+            david_days=5,
+            steph_days=5,
+            david_p1=6,
+            david_p2=5,
+            david_p3=7,
+            steph_p1=5,
+            steph_p2=6,
+            steph_p3=5,
+            best_streak=3,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == SUNDAY_APR_19,
+        )
+    )
+    assert row is not None
+    assert row.david_days == 5
+    assert row.steph_days == 5
+    assert row.david_p1 == 6
+    assert row.david_p2 == 5
+    assert row.david_p3 == 7
+    assert row.steph_p1 == 5
+    assert row.steph_p2 == 6
+    assert row.steph_p3 == 5
+    assert row.best_streak == 3
+
+
+@pytest.mark.asyncio
+async def test_series_stats_nullable_for_old_rows(db_session):
+    """Rows created without stats (pre-migration) have None for all stat columns."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=SUNDAY_APR_19,
+            wins=4,
+            losses=3,
+            status="won",
+            created_at=now,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == SUNDAY_APR_19,
+        )
+    )
+    assert row is not None
+    assert row.david_days is None
+    assert row.best_streak is None
+
+
+@pytest.mark.asyncio
+async def test_stats_written_on_finalization(db_session):
+    """Simulates week finalization: stats are computed and stored on PlayoffSeries."""
+    week_start = SUNDAY_APR_19
+    now = datetime.now(timezone.utc)
+
+    # Build daily results: 4 wins, 2 losses
+    results: list[DailyResult] = []
+    for i in range(4):
+        r = DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=True,
+            steph_complete=True,
+            won=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(r)
+        results.append(r)
+    for i in range(4, 6):
+        r = DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=False,
+            steph_complete=True,
+            won=False,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(r)
+        results.append(r)
+
+    # Build checkin rows: David perfect on all 6 days; Steph misses p1 on last 2
+    checkins: list[PlayoffCheckin] = []
+    for i in range(6):
+        checkins.append(PlayoffCheckin(
+            guild_id=GUILD_ID, user_id=DAVID_ID,
+            checkin_date=week_start + timedelta(days=i),
+            pillar1=True, pillar2=True, pillar3=True,
+            created_at=now, updated_at=now,
+        ))
+    for i in range(4):
+        checkins.append(PlayoffCheckin(
+            guild_id=GUILD_ID, user_id=STEPH_ID,
+            checkin_date=week_start + timedelta(days=i),
+            pillar1=True, pillar2=True, pillar3=True,
+            created_at=now, updated_at=now,
+        ))
+    for i in range(4, 6):
+        checkins.append(PlayoffCheckin(
+            guild_id=GUILD_ID, user_id=STEPH_ID,
+            checkin_date=week_start + timedelta(days=i),
+            pillar1=False, pillar2=True, pillar3=True,
+            created_at=now, updated_at=now,
+        ))
+    for c in checkins:
+        db_session.add(c)
+    await db_session.commit()
+
+    # Simulate finalization (mirrors sunday_review logic)
+    stats = _compute_weekly_stats(results, checkins, week_start)
+    series = PlayoffSeries(
+        guild_id=GUILD_ID,
+        week_start=week_start,
+        wins=4,
+        losses=2,
+        status="won",
+        created_at=now,
+        **stats,
+    )
+    db_session.add(series)
+    await db_session.commit()
+
+    row = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert row is not None
+    assert row.david_days == 4    # David complete only on the 4 win-days
+    assert row.steph_days == 6    # Steph complete on all 6 settled days
+    assert row.david_p1 == 6      # David hit p1 every day
+    assert row.steph_p1 == 4      # Steph missed p1 on last 2 days
+    assert row.steph_p2 == 6      # Steph hit p2 every day
+    assert row.best_streak == 4   # 4 consecutive wins at start of week
+
+
+@pytest.mark.asyncio
+async def test_stats_backfilled_for_old_series_row(db_session):
+    """A finalized row with no stats gets them filled in (pre-migration back-fill)."""
+    week_start = SUNDAY_APR_12
+    now = datetime.now(timezone.utc)
+
+    # Old-style series row: finalized but no stat columns
+    db_session.add(
+        PlayoffSeries(
+            guild_id=GUILD_ID,
+            week_start=week_start,
+            wins=3,
+            losses=4,
+            status="lost",
+            created_at=now,
+        )
+    )
+    daily_results = []
+    checkins = []
+    for i in range(3):
+        daily_results.append(DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=True, steph_complete=True, won=True,
+            created_at=now, updated_at=now,
+        ))
+        for uid in (DAVID_ID, STEPH_ID):
+            checkins.append(PlayoffCheckin(
+                guild_id=GUILD_ID, user_id=uid,
+                checkin_date=week_start + timedelta(days=i),
+                pillar1=True, pillar2=True, pillar3=True,
+                created_at=now, updated_at=now,
+            ))
+    for i in range(3, 7):
+        daily_results.append(DailyResult(
+            guild_id=GUILD_ID,
+            result_date=week_start + timedelta(days=i),
+            david_complete=False, steph_complete=True, won=False,
+            created_at=now, updated_at=now,
+        ))
+        for uid in (DAVID_ID, STEPH_ID):
+            checkins.append(PlayoffCheckin(
+                guild_id=GUILD_ID, user_id=uid,
+                checkin_date=week_start + timedelta(days=i),
+                pillar1=False, pillar2=True, pillar3=True,
+                created_at=now, updated_at=now,
+            ))
+    for obj in daily_results + checkins:
+        db_session.add(obj)
+    await db_session.commit()
+
+    # Simulate back-fill (mirrors auto-heal logic for rows where david_days is None)
+    row = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert row.david_days is None  # not yet filled
+    stats = _compute_weekly_stats(daily_results, checkins, week_start)
+    for key, val in stats.items():
+        setattr(row, key, val)
+    await db_session.commit()
+
+    refreshed = await db_session.scalar(
+        select(PlayoffSeries).where(
+            PlayoffSeries.guild_id == GUILD_ID,
+            PlayoffSeries.week_start == week_start,
+        )
+    )
+    assert refreshed.david_days == 3   # only 3 days David was fully complete
+    assert refreshed.steph_days == 7   # Steph complete all 7 days (p2+p3 even on loss days)
+    assert refreshed.david_p1 == 3     # David hit p1 only on the 3 complete days
+    assert refreshed.steph_p2 == 7     # Steph hit p2 every day
+    assert refreshed.best_streak == 3  # 3 consecutive wins at start
 
 
 # ---------------------------------------------------------------------------
