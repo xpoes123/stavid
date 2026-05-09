@@ -239,13 +239,18 @@ async def _get_ledger_itemized(
     start = datetime.datetime.now(datetime.timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
     )
-    q = select(LedgerEntry).where(
-        LedgerEntry.guild_id == guild_id,
-        LedgerEntry.created_at >= start,
-        (
-            (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id)
-            | (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id)
-        ),
+    q = (
+        select(LedgerEntry)
+        .where(
+            LedgerEntry.guild_id == guild_id,
+            LedgerEntry.created_at >= start,
+            (
+                (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id)
+                | (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id)
+            ),
+        )
+        .order_by(LedgerEntry.created_at.desc())
+        .limit(100)
     )
     return (await s.scalars(q)).all()
 

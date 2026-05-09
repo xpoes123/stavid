@@ -723,20 +723,24 @@ class Playoff(commands.Cog):
             newest_week_end = rows[0].week_start + timedelta(days=6)
             daily_rows = (
                 await s.scalars(
-                    select(DailyResult).where(
+                    select(DailyResult)
+                    .where(
                         DailyResult.guild_id == guild_id,
                         DailyResult.result_date >= oldest_week,
                         DailyResult.result_date <= newest_week_end,
                     )
+                    .limit(200)
                 )
             ).all()
             checkin_rows_history = (
                 await s.scalars(
-                    select(PlayoffCheckin).where(
+                    select(PlayoffCheckin)
+                    .where(
                         PlayoffCheckin.guild_id == guild_id,
                         PlayoffCheckin.checkin_date >= oldest_week,
                         PlayoffCheckin.checkin_date <= newest_week_end,
                     )
+                    .limit(200)
                 )
             ).all()
 
@@ -989,11 +993,14 @@ class Playoff(commands.Cog):
             recent_series = list(
                 (
                     await s.execute(
-                        select(PlayoffSeries).where(
+                        select(PlayoffSeries)
+                        .where(
                             PlayoffSeries.guild_id == guild_id,
                             PlayoffSeries.week_start >= history_cutoff,
                             PlayoffSeries.week_start < prev_week_start,
                         )
+                        .order_by(PlayoffSeries.week_start.desc())
+                        .limit(4)
                     )
                 )
                 .scalars()
