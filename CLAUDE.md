@@ -22,6 +22,13 @@ src/
     basic.py     — /help, /wifi
     budget.py    — /venmo, /pay, /rent, /wifi_bill, /ledger
     reminders.py — /remind, /reminders, /reset_reminders (stubs)
+    playoff.py   — Habit tracker: daily check-ins, win/loss scoring, Sunday weekly review embed
+    bucket.py    — Bucket list tracking
+    datenight.py — Date night logging
+    outings.py   — Outings/activity tracking
+    shopping.py  — Shopping list
+    supplies.py  — Household supplies tracking
+    watchlist.py — Watchlist (movies/shows)
 migrations/
   versions/      — Alembic migration files
 ```
@@ -73,7 +80,7 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | `/help`, `/wifi` | Done |
 | `/venmo`, `/pay`, `/rent`, `/wifi_bill`, `/ledger` | Done |
 | `/remind`, `/reminders`, `/reset_reminders` | Stubbed — not implemented |
-| Playoff Week habit tracker | Designed (see `00_overview.md`–`03_open_questions.md`) — not built |
+| Playoff Week habit tracker | Built — daily check-ins, series scoring, Sunday weekly review with per-pillar breakdown and recent series history (see `playoff.py`) |
 
 ## Active Design Docs
 - [00_overview.md](00_overview.md) — Playoff Week concept and user profiles
