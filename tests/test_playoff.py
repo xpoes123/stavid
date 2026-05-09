@@ -1614,6 +1614,82 @@ def test_embed_footer_mentions_weekly_review():
     assert "weekly_review" in embed.footer.text.lower() or "weekly_review" in (embed.footer.text or "")
 
 
+def _make_series(week_start: date, wins: int, losses: int, status: str) -> PlayoffSeries:
+    """Create an unsaved PlayoffSeries for testing."""
+    return PlayoffSeries(
+        guild_id=GUILD_ID,
+        week_start=week_start,
+        wins=wins,
+        losses=losses,
+        status=status,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_embed_recent_record_field_present_with_history():
+    """When series_history is provided, a 'Recent Record' field appears."""
+    history = [
+        _make_series(WEEK_SUN - timedelta(weeks=1), 4, 3, "won"),
+        _make_series(WEEK_SUN - timedelta(weeks=2), 2, 5, "lost"),
+    ]
+    embed = build_weekly_embed([], WEEK_SUN, series_history=history)
+    field_names = [f.name for f in embed.fields]
+    assert any("Recent Record" in name for name in field_names)
+
+
+def test_embed_recent_record_win_loss_summary():
+    """Recent Record field summarises overall W–L across provided weeks."""
+    history = [
+        _make_series(WEEK_SUN - timedelta(weeks=1), 4, 2, "won"),
+        _make_series(WEEK_SUN - timedelta(weeks=2), 1, 6, "lost"),
+        _make_series(WEEK_SUN - timedelta(weeks=3), 5, 1, "won"),
+    ]
+    embed = build_weekly_embed([], WEEK_SUN, series_history=history)
+    record_field = next(f for f in embed.fields if "Recent Record" in f.name)
+    # 2 wins out of 3 weeks
+    assert "2W" in record_field.value or "2W" in record_field.value.replace(" ", "")
+    assert "1L" in record_field.value or "1L" in record_field.value.replace(" ", "")
+
+
+def test_embed_recent_record_shows_week_labels():
+    """Each history week shows its start date and score."""
+    prev_week = WEEK_SUN - timedelta(weeks=1)
+    history = [_make_series(prev_week, 4, 3, "won")]
+    embed = build_weekly_embed([], WEEK_SUN, series_history=history)
+    record_field = next(f for f in embed.fields if "Recent Record" in f.name)
+    # The week label should appear (e.g. "Apr 12")
+    assert prev_week.strftime("%b %d") in record_field.value
+
+
+def test_embed_no_recent_record_when_history_empty():
+    """When series_history is an empty list, no 'Recent Record' field is added."""
+    embed = build_weekly_embed([], WEEK_SUN, series_history=[])
+    field_names = [f.name for f in embed.fields]
+    assert not any("Recent Record" in name for name in field_names)
+
+
+def test_embed_no_recent_record_when_history_none():
+    """When series_history is None (default), no 'Recent Record' field is added."""
+    embed = build_weekly_embed([], WEEK_SUN)
+    field_names = [f.name for f in embed.fields]
+    assert not any("Recent Record" in name for name in field_names)
+
+
+def test_embed_history_sorted_newest_first():
+    """Weeks in the Recent Record field appear with newest first."""
+    older = WEEK_SUN - timedelta(weeks=2)
+    newer = WEEK_SUN - timedelta(weeks=1)
+    history = [
+        _make_series(older, 2, 5, "lost"),
+        _make_series(newer, 4, 3, "won"),
+    ]
+    embed = build_weekly_embed([], WEEK_SUN, series_history=history)
+    record_field = next(f for f in embed.fields if "Recent Record" in f.name)
+    newer_label = newer.strftime("%b %d")
+    older_label = older.strftime("%b %d")
+    assert record_field.value.index(newer_label) < record_field.value.index(older_label)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
