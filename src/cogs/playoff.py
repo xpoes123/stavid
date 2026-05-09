@@ -158,6 +158,7 @@ def build_weekly_embed(
     daily_results: list[DailyResult],
     week_start: date,
     checkin_rows: list[PlayoffCheckin] | None = None,
+    series_history: list[PlayoffSeries] | None = None,
 ) -> discord.Embed:
     """Build a rich Discord embed for the Sunday weekly review.
 
@@ -166,6 +167,8 @@ def build_weekly_embed(
         week_start: The Sunday that starts the week.
         checkin_rows: Optional PlayoffCheckin rows for the week — used to
             compute per-pillar completion rates per person.
+        series_history: Optional past PlayoffSeries rows (most recent first) to
+            render a "Recent Record" field showing the last few weeks' results.
     """
     by_date = {r.result_date: r for r in daily_results}
     week_dates = [week_start + timedelta(days=i) for i in range(7)]
@@ -259,6 +262,23 @@ def build_weekly_embed(
         embed.add_field(
             name="Best Streak",
             value=f"🔥 {max_streak} days in a row!",
+            inline=False,
+        )
+
+    # Recent series history (last N weeks, sorted newest-first)
+    if series_history:
+        history_sorted = sorted(series_history, key=lambda s: s.week_start, reverse=True)
+        history_lines: list[str] = []
+        for s in history_sorted:
+            icon = "🏆" if s.status == "won" else "💀"
+            week_label = s.week_start.strftime("%b %d")
+            history_lines.append(f"{icon} {week_label}: {s.wins}–{s.losses}")
+        total_weeks = len(history_sorted)
+        wins_in_history = sum(1 for s in history_sorted if s.status == "won")
+        record_line = f"**{wins_in_history}W – {total_weeks - wins_in_history}L** over last {total_weeks} week{'s' if total_weeks != 1 else ''}"
+        embed.add_field(
+            name="Recent Record",
+            value=record_line + "\n" + "\n".join(history_lines),
             inline=False,
         )
 
@@ -875,7 +895,23 @@ class Playoff(commands.Cog):
                 .all()
             )
 
-        embed = build_weekly_embed(rows, prev_week_start, checkin_rows)
+            # Fetch the last 4 completed series weeks (excluding current week)
+            history_cutoff = prev_week_start - timedelta(weeks=4)
+            recent_series = list(
+                (
+                    await s.execute(
+                        select(PlayoffSeries).where(
+                            PlayoffSeries.guild_id == guild_id,
+                            PlayoffSeries.week_start >= history_cutoff,
+                            PlayoffSeries.week_start < prev_week_start,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        embed = build_weekly_embed(rows, prev_week_start, checkin_rows, recent_series or None)
         await channel.send(embed=embed)
 
     @sunday_review.before_loop
