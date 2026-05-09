@@ -182,6 +182,17 @@ class PlayoffSeries(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    # Per-person and per-pillar stats — populated when a week is finalized.
+    # Nullable so rows created before this migration remain valid.
+    david_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    steph_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    david_p1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    david_p2: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    david_p3: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    steph_p1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    steph_p2: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    steph_p3: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    best_streak: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class DailyResult(Base):

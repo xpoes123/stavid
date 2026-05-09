@@ -48,6 +48,54 @@ def week_start_for(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
+def _compute_weekly_stats(
+    daily_results: list[DailyResult],
+    checkin_rows: list[PlayoffCheckin],
+    week_start: date,
+) -> dict:
+    """Compute per-person, per-pillar, and streak stats for a completed week.
+
+    Returns a dict of values ready to be stored on a PlayoffSeries row.
+    All values are integers (never None), so callers can assign them directly.
+    """
+    by_date = {r.result_date: r for r in daily_results}
+    week_dates = [week_start + timedelta(days=i) for i in range(7)]
+
+    david_days = sum(1 for r in daily_results if r.david_complete)
+    steph_days = sum(1 for r in daily_results if r.steph_complete)
+
+    david_checkins = [r for r in checkin_rows if r.user_id == DAVID_ID]
+    steph_checkins = [r for r in checkin_rows if r.user_id == STEPH_ID]
+
+    d_p1 = sum(1 for r in david_checkins if r.pillar1)
+    d_p2 = sum(1 for r in david_checkins if r.pillar2)
+    d_p3 = sum(1 for r in david_checkins if r.pillar3)
+    s_p1 = sum(1 for r in steph_checkins if r.pillar1)
+    s_p2 = sum(1 for r in steph_checkins if r.pillar2)
+    s_p3 = sum(1 for r in steph_checkins if r.pillar3)
+
+    # Streak iterates all 7 week days; unsettled days count as non-wins.
+    max_streak = cur_streak = 0
+    for d in week_dates:
+        if d in by_date and by_date[d].won:
+            cur_streak += 1
+            max_streak = max(max_streak, cur_streak)
+        else:
+            cur_streak = 0
+
+    return {
+        "david_days": david_days,
+        "steph_days": steph_days,
+        "david_p1": d_p1,
+        "david_p2": d_p2,
+        "david_p3": d_p3,
+        "steph_p1": s_p1,
+        "steph_p2": s_p2,
+        "steph_p3": s_p3,
+        "best_streak": max_streak,
+    }
+
+
 def finalize_series_status(daily_results: list[DailyResult]) -> str:
     """Determine the final "won" or "lost" status for a completed week.
 
@@ -682,6 +730,15 @@ class Playoff(commands.Cog):
                     )
                 )
             ).all()
+            checkin_rows_history = (
+                await s.scalars(
+                    select(PlayoffCheckin).where(
+                        PlayoffCheckin.guild_id == guild_id,
+                        PlayoffCheckin.checkin_date >= oldest_week,
+                        PlayoffCheckin.checkin_date <= newest_week_end,
+                    )
+                )
+            ).all()
 
             # Group DailyResult rows by the Sunday that started their week
             daily_by_week: dict[date, list[DailyResult]] = {}
@@ -689,17 +746,37 @@ class Playoff(commands.Cog):
                 ws = week_start_for(dr.result_date)
                 daily_by_week.setdefault(ws, []).append(dr)
 
+            # Group PlayoffCheckin rows by week (for stats computation)
+            checkins_by_week: dict[date, list[PlayoffCheckin]] = {}
+            for ci in checkin_rows_history:
+                ws = week_start_for(ci.checkin_date)
+                checkins_by_week.setdefault(ws, []).append(ci)
+
             # Auto-heal stale "ongoing" status for fully completed past weeks.
             # If the bot missed a Sunday review, old weeks stay "ongoing" forever
-            # unless we fix them here.
+            # unless we fix them here.  Also persist stats for any healed week
+            # that doesn't have them yet.
             needs_commit = False
             for row in rows:
                 week_end = row.week_start + timedelta(days=6)
-                if week_end < today and row.status == "ongoing":
+                is_past = week_end < today
+                if is_past and row.status == "ongoing":
                     week_daily = daily_by_week.get(row.week_start, [])
                     row.wins = sum(1 for dr in week_daily if dr.won)
                     row.losses = sum(1 for dr in week_daily if not dr.won)
                     row.status = finalize_series_status(week_daily)
+                    week_checkins = checkins_by_week.get(row.week_start, [])
+                    stats = _compute_weekly_stats(week_daily, week_checkins, row.week_start)
+                    for key, val in stats.items():
+                        setattr(row, key, val)
+                    needs_commit = True
+                elif is_past and row.david_days is None:
+                    # Week already finalized but stats not yet persisted (pre-migration row).
+                    week_daily = daily_by_week.get(row.week_start, [])
+                    week_checkins = checkins_by_week.get(row.week_start, [])
+                    stats = _compute_weekly_stats(week_daily, week_checkins, row.week_start)
+                    for key, val in stats.items():
+                        setattr(row, key, val)
                     needs_commit = True
             if needs_commit:
                 await s.commit()
@@ -708,9 +785,15 @@ class Playoff(commands.Cog):
         lines = []
         for r in rows:
             icon = icons.get(r.status, "❓")
-            week_daily = daily_by_week.get(r.week_start, [])
-            david_days = sum(1 for dr in week_daily if dr.david_complete)
-            steph_days = sum(1 for dr in week_daily if dr.steph_complete)
+            # Use persisted stats when available; fall back to live computation
+            # for the current (ongoing) week or pre-migration rows.
+            if r.david_days is not None:
+                david_days = r.david_days
+                steph_days = r.steph_days
+            else:
+                week_daily = daily_by_week.get(r.week_start, [])
+                david_days = sum(1 for dr in week_daily if dr.david_complete)
+                steph_days = sum(1 for dr in week_daily if dr.steph_complete)
             lines.append(
                 f"{icon} Week of {r.week_start.strftime('%b %d')} — "
                 f"**{r.wins}–{r.losses}** ({r.status})"
@@ -850,36 +933,8 @@ class Playoff(commands.Cog):
                 .all()
             )
 
-            # Finalize the previous week's series record so history is accurate
-            # even for weeks that didn't hit 4 wins/losses before the week ended.
-            if rows:
-                wins_final = sum(1 for r in rows if r.won)
-                losses_final = sum(1 for r in rows if not r.won)
-                final_status = finalize_series_status(rows)
-
-                prev_series = await s.scalar(
-                    select(PlayoffSeries).where(
-                        PlayoffSeries.guild_id == guild_id,
-                        PlayoffSeries.week_start == prev_week_start,
-                    )
-                )
-                if prev_series:
-                    prev_series.wins = wins_final
-                    prev_series.losses = losses_final
-                    prev_series.status = final_status
-                else:
-                    s.add(
-                        PlayoffSeries(
-                            guild_id=guild_id,
-                            week_start=prev_week_start,
-                            wins=wins_final,
-                            losses=losses_final,
-                            status=final_status,
-                        )
-                    )
-                await s.commit()
-
-            # Fetch per-person checkin rows for the detailed pillar breakdown
+            # Fetch per-person checkin rows — needed for pillar breakdown in the
+            # embed AND for persisting per-pillar stats on the series record.
             checkin_rows = list(
                 (
                     await s.execute(
@@ -894,6 +949,40 @@ class Playoff(commands.Cog):
                 .scalars()
                 .all()
             )
+
+            # Finalize the previous week's series record so history is accurate
+            # even for weeks that didn't hit 4 wins/losses before the week ended.
+            # Also persist per-person, per-pillar, and streak stats for historical queries.
+            if rows:
+                wins_final = sum(1 for r in rows if r.won)
+                losses_final = sum(1 for r in rows if not r.won)
+                final_status = finalize_series_status(rows)
+                stats = _compute_weekly_stats(rows, checkin_rows, prev_week_start)
+
+                prev_series = await s.scalar(
+                    select(PlayoffSeries).where(
+                        PlayoffSeries.guild_id == guild_id,
+                        PlayoffSeries.week_start == prev_week_start,
+                    )
+                )
+                if prev_series:
+                    prev_series.wins = wins_final
+                    prev_series.losses = losses_final
+                    prev_series.status = final_status
+                    for key, val in stats.items():
+                        setattr(prev_series, key, val)
+                else:
+                    s.add(
+                        PlayoffSeries(
+                            guild_id=guild_id,
+                            week_start=prev_week_start,
+                            wins=wins_final,
+                            losses=losses_final,
+                            status=final_status,
+                            **stats,
+                        )
+                    )
+                await s.commit()
 
             # Fetch the last 4 completed series weeks (excluding current week)
             history_cutoff = prev_week_start - timedelta(weeks=4)
