@@ -31,10 +31,22 @@ venv/bin/alembic current
 venv/bin/alembic upgrade head
 ```
 
-Migrations are NOT auto-applied by Sentinel — when a PR adds an alembic
-revision, run `venv/bin/alembic upgrade head` on the VPS after the
-deploy completes. (TODO: add `ExecStartPre=/opt/stavid/venv/bin/alembic
-upgrade head` to `stavid.service` to make this automatic.)
+Migrations are auto-applied on every systemd restart via a drop-in
+override at `deploy/stavid.service.d/30-alembic.conf` — it adds an
+`ExecStartPre=alembic upgrade head` so a Sentinel auto-deploy of a
+PR with a new migration applies cleanly without anyone SSHing in.
+
+If the upgrade fails the bot won't start — check `journalctl -u
+stavid` and run `alembic` by hand to diagnose. One-time install on
+a fresh box:
+
+```bash
+sudo install -m 0644 -D \
+  /opt/stavid/deploy/stavid.service.d/30-alembic.conf \
+  /etc/systemd/system/stavid.service.d/30-alembic.conf
+sudo systemctl daemon-reload
+sudo systemctl restart stavid
+```
 
 ## Project Structure
 ```
