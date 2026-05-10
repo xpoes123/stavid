@@ -1,4 +1,9 @@
-"""#things-to-purchase → ShoppingItem with note=\"non-food\"."""
+"""#things-to-purchase → ShoppingItem.
+
+Canonical shopping channel for the apartment guild — #groceries has been
+deleted and consolidated into here, so the cog no longer auto-tags items as
+"non-food". A bare URL becomes the item link; bare text becomes the name.
+"""
 from __future__ import annotations
 
 import logging
@@ -14,7 +19,6 @@ if t.TYPE_CHECKING:
     from src.main import StavidBot
 
 CHANNEL = "things-to-purchase"
-NON_FOOD_NOTE = "non-food"
 log = logging.getLogger(__name__)
 
 
@@ -42,7 +46,7 @@ class ThingsToPurchaseInbox(commands.Cog):
                         guild_id=message.guild.id,
                         name=name,
                         link=link,
-                        note=NON_FOOD_NOTE,
+                        note="",
                         added_by=message.author.id,
                     )
                 )
