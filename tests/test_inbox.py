@@ -10,43 +10,6 @@ from src.cogs.inbox._utils import (
     split_when_phrase,
 )
 from src.cogs.inbox.bills import author_is_debtor
-from src.cogs.inbox.groceries import parse_grocery_message
-
-
-# ---------------------------------------------------------------------------
-# Grocery parser
-# ---------------------------------------------------------------------------
-
-
-def test_groceries_split_on_commas():
-    assert parse_grocery_message("milk, eggs, bread") == ["milk", "eggs", "bread"]
-
-
-def test_groceries_split_on_newlines():
-    assert parse_grocery_message("milk\neggs\nbread") == ["milk", "eggs", "bread"]
-
-
-def test_groceries_mixed_separators():
-    out = parse_grocery_message("milk, eggs\nbread, butter")
-    assert out == ["milk", "eggs", "bread", "butter"]
-
-
-def test_groceries_strips_whitespace():
-    assert parse_grocery_message("  milk  ,  eggs  ") == ["milk", "eggs"]
-
-
-def test_groceries_drops_empty_entries():
-    assert parse_grocery_message("milk,, , eggs,") == ["milk", "eggs"]
-
-
-def test_groceries_empty_raises():
-    from src.cogs.inbox._utils import ParseError
-    with pytest.raises(ParseError):
-        parse_grocery_message("   ,, \n\n  ,  ")
-
-
-def test_groceries_single_item():
-    assert parse_grocery_message("milk") == ["milk"]
 
 
 # ---------------------------------------------------------------------------

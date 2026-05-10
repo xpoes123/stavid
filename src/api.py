@@ -203,6 +203,22 @@ def create_app(sessionmaker) -> FastAPI:
             added_by=row.added_by, bought=row.bought, created_at=row.created_at,
         )
 
+    @app.post("/shopping/{item_id}/bought", response_model=ShoppingOut)
+    async def mark_shopping_bought(
+        item_id: int, _: None = Depends(_require_bearer),
+    ):
+        async with sessionmaker() as s:
+            row = await s.get(ShoppingItem, item_id)
+            if row is None or row.guild_id != GUILD_ID:
+                raise HTTPException(404, f"Shopping item {item_id} not found")
+            row.bought = True
+            await s.commit()
+            await s.refresh(row)
+        return ShoppingOut(
+            id=row.id, name=row.name, link=row.link, note=row.note,
+            added_by=row.added_by, bought=row.bought, created_at=row.created_at,
+        )
+
     # --- watchlist ---
 
     @app.get("/watchlist", response_model=list[WatchlistOut])
@@ -237,6 +253,22 @@ def create_app(sessionmaker) -> FastAPI:
                 link=req.link, note=req.note, added_by=req.added_by, watched=False,
             )
             s.add(row)
+            await s.commit()
+            await s.refresh(row)
+        return WatchlistOut(
+            id=row.id, title=row.title, media_type=row.media_type, link=row.link,
+            note=row.note, added_by=row.added_by, watched=row.watched,
+        )
+
+    @app.post("/watchlist/{item_id}/watched", response_model=WatchlistOut)
+    async def mark_watchlist_watched(
+        item_id: int, _: None = Depends(_require_bearer),
+    ):
+        async with sessionmaker() as s:
+            row = await s.get(WatchlistItem, item_id)
+            if row is None or row.guild_id != GUILD_ID:
+                raise HTTPException(404, f"Watchlist item {item_id} not found")
+            row.watched = True
             await s.commit()
             await s.refresh(row)
         return WatchlistOut(
@@ -285,6 +317,22 @@ def create_app(sessionmaker) -> FastAPI:
             note=row.note, added_by=row.added_by, completed=row.completed,
         )
 
+    @app.post("/bucket/{item_id}/completed", response_model=BucketOut)
+    async def mark_bucket_completed(
+        item_id: int, _: None = Depends(_require_bearer),
+    ):
+        async with sessionmaker() as s:
+            row = await s.get(BucketListItem, item_id)
+            if row is None or row.guild_id != GUILD_ID:
+                raise HTTPException(404, f"Bucket item {item_id} not found")
+            row.completed = True
+            await s.commit()
+            await s.refresh(row)
+        return BucketOut(
+            id=row.id, title=row.title, category=row.category, link=row.link,
+            note=row.note, added_by=row.added_by, completed=row.completed,
+        )
+
     # --- outings (restaurants + activities to try) ---
 
     @app.get("/outings", response_model=list[OutingOut])
@@ -324,6 +372,23 @@ def create_app(sessionmaker) -> FastAPI:
                 note=req.note, added_by=req.added_by,
             )
             s.add(row)
+            await s.commit()
+            await s.refresh(row)
+        return OutingOut(
+            id=row.id, name=row.name, category=row.category, budget=row.budget,
+            neighborhood=row.neighborhood, link=row.link, note=row.note,
+            visited=row.visited,
+        )
+
+    @app.post("/outings/{item_id}/visited", response_model=OutingOut)
+    async def mark_outing_visited(
+        item_id: int, _: None = Depends(_require_bearer),
+    ):
+        async with sessionmaker() as s:
+            row = await s.get(OutingWishlistItem, item_id)
+            if row is None or row.guild_id != GUILD_ID:
+                raise HTTPException(404, f"Outing item {item_id} not found")
+            row.visited = True
             await s.commit()
             await s.refresh(row)
         return OutingOut(
