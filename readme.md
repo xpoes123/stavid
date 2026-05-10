@@ -69,8 +69,7 @@ Plain messages in certain apartment-guild channels turn into rows automatically.
 | Channel | Behavior |
 |---|---|
 | `#groceries` | One `ShoppingItem` per comma- or newline-separated entry |
-| `#amazon-links` | `ShoppingItem` with `og_*` metadata via the OG scraper |
-| `#things-to-purchase` | `ShoppingItem` with `note="non-food"` |
+| `#things-to-purchase` | `ShoppingItem` with `note="non-food"` (Amazon URLs auto-fetch OG metadata via `/shopping_add`) |
 | `#restaurants` | `OutingWishlistItem` (`italian: Carbone` syntax sets cuisine) |
 | `#things-to-do`, `#local-events` | `OutingWishlistItem` (category `activity`) |
 | `#reminders` | `ReminderEntry` (parses `<note> in <when>` plus natural phrases) |
