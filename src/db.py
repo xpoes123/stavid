@@ -241,6 +241,62 @@ class WeeklyReview(Base):
     )
 
 
+class ChoreTemplate(Base):
+    """A recurring chore template — produces ChoreInstance rows on a schedule.
+
+    Recurrence is one of "weekly" or "monthly". One-off chores are created as
+    ChoreInstance rows directly with template_id=NULL — they don't need a
+    template.
+
+    Assignment: ``default_assignee_id`` is NULL for "alternate" rotation
+    (instances flip between partners using ``last_assignee_id``), or set to a
+    specific user ID to always assign to that person.
+    """
+
+    __tablename__ = "chore_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    recurrence: Mapped[str] = mapped_column(Text, nullable=False)
+    default_assignee_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_assignee_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class ChoreInstance(Base):
+    """A single instance of a chore (recurring or one-off)."""
+
+    __tablename__ = "chore_instances"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    template_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    assignee_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    due_date: Mapped[_dt.date] = mapped_column(Date, index=True, nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class UserPreference(Base):
     """Per-user playoff preferences: custom pillar names and check-in hour.
 

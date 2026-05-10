@@ -54,6 +54,7 @@ src/
     shopping.py     — Shopping list with Amazon OG scraping
     supplies.py     — Household supplies tracking
     watchlist.py    — Watchlist (movies/shows)
+    chores.py       — Recurring chore templates + instances + materialize loop
     inbox/          — Channel-as-inbox routing (one cog per channel)
 migrations/
   versions/    — Alembic migration files
@@ -138,7 +139,7 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | Channel-as-inbox routing | Done |
 | Sage HTTP API | Done |
 | User preferences (custom pillars + check-in hour) | Done — `/set_pillar`, `/set_checkin_time`, `/my_preferences` |
-| Chore system (templates + instances + reminders) | Planned |
+| Chore system (templates + instances + reminders) | Done — `/chore add`, `/chore template`, `/chore complete`, `/chores`, `/chore templates`, `/chore template_remove`. Wired up `#weekly-chores` and `#monthly-chores` inbox routing. |
 | Date night history & stats | Done — `/datenight history`, `/datenight stats`, `/datenight wishlist` |
 
 ## Active Design Docs
