@@ -1,6 +1,7 @@
 # src/cogs/playoff.py
 from __future__ import annotations
 
+import logging
 import os
 import typing as t
 from datetime import datetime, timezone, date, timedelta
@@ -11,11 +12,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import select
 
-from src.db import DailyResult, PlayoffCheckin, PlayoffSeries, WeeklyReview
+from src.db import PlayoffCheckin, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
+
+log = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
@@ -29,6 +32,11 @@ STEPH_PILLARS = [
     "Some form of movement",
     "At least 15 min on a finite project",
 ]
+DEFAULT_PILLARS = ["Pillar 1", "Pillar 2", "Pillar 3"]
+
+USER_NAMES = {DAVID_ID: "David", STEPH_ID: "Stephanie"}
+
+WIN_THRESHOLD = 4  # individual wins needed to win the week
 
 
 def get_pillar_names(user_id: int) -> list[str]:
@@ -36,7 +44,7 @@ def get_pillar_names(user_id: int) -> list[str]:
         return DAVID_PILLARS
     if user_id == STEPH_ID:
         return STEPH_PILLARS
-    return ["Pillar 1", "Pillar 2", "Pillar 3"]
+    return DEFAULT_PILLARS
 
 
 def today_et() -> date:
@@ -48,148 +56,167 @@ def week_start_for(d: date) -> date:
     return d - timedelta(days=(d.weekday() + 1) % 7)
 
 
-def _compute_weekly_stats(
-    daily_results: list[DailyResult],
-    checkin_rows: list[PlayoffCheckin],
-    week_start: date,
-) -> dict:
-    """Compute per-person, per-pillar, and streak stats for a completed week.
-
-    Returns a dict of values ready to be stored on a PlayoffSeries row.
-    All values are integers (never None), so callers can assign them directly.
-    """
-    by_date = {r.result_date: r for r in daily_results}
-    week_dates = [week_start + timedelta(days=i) for i in range(7)]
-
-    david_days = sum(1 for r in daily_results if r.david_complete)
-    steph_days = sum(1 for r in daily_results if r.steph_complete)
-
-    david_checkins = [r for r in checkin_rows if r.user_id == DAVID_ID]
-    steph_checkins = [r for r in checkin_rows if r.user_id == STEPH_ID]
-
-    d_p1 = sum(1 for r in david_checkins if r.pillar1)
-    d_p2 = sum(1 for r in david_checkins if r.pillar2)
-    d_p3 = sum(1 for r in david_checkins if r.pillar3)
-    s_p1 = sum(1 for r in steph_checkins if r.pillar1)
-    s_p2 = sum(1 for r in steph_checkins if r.pillar2)
-    s_p3 = sum(1 for r in steph_checkins if r.pillar3)
-
-    # Streak iterates all 7 week days; unsettled days count as non-wins.
-    max_streak = cur_streak = 0
-    for d in week_dates:
-        if d in by_date and by_date[d].won:
-            cur_streak += 1
-            max_streak = max(max_streak, cur_streak)
-        else:
-            cur_streak = 0
-
-    return {
-        "david_days": david_days,
-        "steph_days": steph_days,
-        "david_p1": d_p1,
-        "david_p2": d_p2,
-        "david_p3": d_p3,
-        "steph_p1": s_p1,
-        "steph_p2": s_p2,
-        "steph_p3": s_p3,
-        "best_streak": max_streak,
-    }
+def is_full_day_win(c: PlayoffCheckin) -> bool:
+    """A user wins their day iff they completed all 3 pillars."""
+    return bool(c.pillar1 and c.pillar2 and c.pillar3)
 
 
-def finalize_series_status(daily_results: list[DailyResult]) -> str:
-    """Determine the final "won" or "lost" status for a completed week.
+def tally_user_week(checkins: list[PlayoffCheckin]) -> tuple[int, int]:
+    """Return (wins, losses) for one user's week given their check-ins."""
+    wins = sum(1 for c in checkins if is_full_day_win(c))
+    losses = len(checkins) - wins
+    return wins, losses
 
-    Called at week end (Sunday review) to lock in the result.  A series
-    is won only if 4 or more combined wins were recorded; anything less is
-    a loss — the week is over and there are no more days to play.
-    """
-    wins = sum(1 for r in daily_results if r.won)
-    return "won" if wins >= 4 else "lost"
+
+def finalize_user_status(checkins: list[PlayoffCheckin]) -> str:
+    """Return 'won' if the user hit ≥ WIN_THRESHOLD individual wins, else 'lost'."""
+    wins, _ = tally_user_week(checkins)
+    return "won" if wins >= WIN_THRESHOLD else "lost"
 
 
 def series_message(wins: int, losses: int) -> str:
-    """Return motivational / status text for current series score."""
-    if wins >= 4:
-        return "🏆 **Series Won!** You won the week!"
-    if losses >= 4:
-        return "💀 Series lost. Better luck next week."
+    """Return motivational status text for an individual's W/L count."""
+    if wins >= WIN_THRESHOLD:
+        return "🏆 **Week Won!**"
+    if losses >= WIN_THRESHOLD:
+        return "💀 Week lost."
 
-    wins_needed = 4 - wins
+    wins_needed = WIN_THRESHOLD - wins
     games_left = 7 - wins - losses
 
     if losses >= 3 and wins < 2:
-        return (
-            f"⚠️ Down {wins}–{losses} — need {wins_needed} straight. **Still alive!**"
-        )
+        return f"⚠️ {wins}–{losses} — need {wins_needed} straight. **Still alive!**"
     if losses > wins:
         return (
-            f"📊 Down {wins}–{losses} — still in it. "
-            f"Need {wins_needed} more win{'s' if wins_needed != 1 else ''} "
-            f"with {games_left} left."
+            f"📊 {wins}–{losses} — still in it. "
+            f"Need {wins_needed} more "
+            f"with {games_left} day{'s' if games_left != 1 else ''} left."
         )
     if wins > losses:
-        return f"✅ Up {wins}–{losses} — keep the momentum! Need {wins_needed} more."
-    return f"⚖️ Tied {wins}–{losses} — anyone's series. Need {wins_needed} more."
+        return f"✅ {wins}–{losses} — keep the momentum! Need {wins_needed} more."
+    if wins == 0 and losses == 0:
+        return f"📅 Fresh week — need {wins_needed} wins."
+    return f"⚖️ Tied {wins}–{losses}. Need {wins_needed} more."
 
 
 _DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
 
-def format_weekly_summary(daily_results: list[DailyResult], week_start: date) -> str:
-    """Build a detailed weekly summary string from DailyResult rows.
+def _user_label(user_id: int) -> str:
+    return USER_NAMES.get(user_id, f"<@{user_id}>")
 
-    Args:
-        daily_results: All DailyResult rows for the given week (any order).
-        week_start: The Sunday that starts the week.
-    """
-    by_date = {r.result_date: r for r in daily_results}
+
+def _longest_streak(seq: list[bool]) -> int:
+    best = cur = 0
+    for v in seq:
+        if v:
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+def build_user_week_lines(
+    checkins: list[PlayoffCheckin], week_start: date
+) -> tuple[list[str], list[bool]]:
+    """Return (per-day lines, win sequence) for a user's week of check-ins."""
+    by_date = {c.checkin_date: c for c in checkins}
     week_dates = [week_start + timedelta(days=i) for i in range(7)]
 
-    david_days = sum(1 for r in daily_results if r.david_complete)
-    steph_days = sum(1 for r in daily_results if r.steph_complete)
-    combined_wins = sum(1 for r in daily_results if r.won)
-    total_played = len(daily_results)
-
-    # Build per-day lines and win sequence for streak calculation
-    day_lines: list[str] = []
-    win_sequence: list[bool] = []
+    lines: list[str] = []
+    seq: list[bool] = []
     for i, d in enumerate(week_dates):
         label = f"{_DAY_NAMES[i]} {d.strftime('%m/%d')}"
-        if d in by_date:
-            r = by_date[d]
-            d_icon = "✅" if r.david_complete else "❌"
-            s_icon = "✅" if r.steph_complete else "❌"
-            result_label = "🏆 Win" if r.won else "💔 Loss"
-            day_lines.append(f"`{label}`  D:{d_icon} S:{s_icon} → {result_label}")
-            win_sequence.append(r.won)
+        c = by_date.get(d)
+        if c is None:
+            lines.append(f"`{label}` —")
+            seq.append(False)
+            continue
+        if is_full_day_win(c):
+            lines.append(f"`{label}` 🏆")
+            seq.append(True)
         else:
-            day_lines.append(f"`{label}`  —")
-            win_sequence.append(False)
+            misses = sum(1 for v in (c.pillar1, c.pillar2, c.pillar3) if not v)
+            lines.append(f"`{label}` 💔 ({misses} pillar{'s' if misses != 1 else ''} missed)")
+            seq.append(False)
+    return lines, seq
 
-    # Longest consecutive-win streak within the week
-    max_streak = cur_streak = 0
-    for w in win_sequence:
-        if w:
-            cur_streak += 1
-            max_streak = max(max_streak, cur_streak)
-        else:
-            cur_streak = 0
 
-    lines: list[str] = ["☀️ **Sunday Weekly Review**\n"]
+def build_user_weekly_embed(
+    user_id: int,
+    checkins: list[PlayoffCheckin],
+    week_start: date,
+) -> discord.Embed:
+    """Build a per-user weekly review embed."""
+    pillars = get_pillar_names(user_id)
+    wins, losses = tally_user_week(checkins)
+    status = finalize_user_status(checkins)
+    week_end = week_start + timedelta(days=6)
 
-    if total_played == 0:
+    if status == "won":
+        color = discord.Color.green()
+        status_line = f"🏆 **{wins}–{losses} — WON!**"
+    else:
+        color = discord.Color.red()
+        status_line = f"💀 **{wins}–{losses} — Lost**"
+
+    if not checkins:
+        color = discord.Color.greyple()
+        status_line = "No check-ins recorded for last week."
+
+    embed = discord.Embed(
+        title=(
+            f"☀️ Weekly Review — {_user_label(user_id)} — "
+            f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d')}"
+        ),
+        description=status_line,
+        color=color,
+    )
+
+    day_lines, win_seq = build_user_week_lines(checkins, week_start)
+    if day_lines:
+        embed.add_field(name="Day-by-Day", value="\n".join(day_lines), inline=False)
+
+    if checkins:
+        denom = len(checkins)
+        p_counts = [
+            sum(1 for c in checkins if c.pillar1),
+            sum(1 for c in checkins if c.pillar2),
+            sum(1 for c in checkins if c.pillar3),
+        ]
+        pillar_lines = [
+            f"{'✅' if p_counts[i] == denom else '🔸'} {pillars[i][:40]}: {p_counts[i]}/{denom}"
+            for i in range(3)
+        ]
+        embed.add_field(name="Per-Pillar", value="\n".join(pillar_lines), inline=False)
+
+    streak = _longest_streak(win_seq)
+    if streak >= 2:
+        embed.add_field(name="Best Streak", value=f"🔥 {streak} days in a row!", inline=False)
+
+    embed.set_footer(text="Use /weekly_review to share your reflection • New week starts today.")
+    return embed
+
+
+def format_user_weekly_summary(
+    user_id: int, checkins: list[PlayoffCheckin], week_start: date
+) -> str:
+    """Plain-text version of the weekly review for a single user."""
+    wins, losses = tally_user_week(checkins)
+    lines: list[str] = [f"☀️ **Weekly Review — {_user_label(user_id)}**\n"]
+
+    if not checkins:
         lines.append("No check-ins recorded for last week.")
     else:
-        lines.append(f"**Series result: {combined_wins}–{total_played - combined_wins}**")
+        lines.append(f"**Week result: {wins}–{losses}** ({finalize_user_status(checkins)})")
+        day_lines, win_seq = build_user_week_lines(checkins, week_start)
         lines.append("")
-        lines.append("**Day-by-day breakdown:**")
+        lines.append("**Day-by-day:**")
         lines.extend(day_lines)
-        lines.append("")
-        lines.append(f"**David:** {david_days}/7 days complete")
-        lines.append(f"**Steph:** {steph_days}/7 days complete")
-        lines.append(f"**Combined wins:** {combined_wins}/7 days")
-        if max_streak >= 2:
-            lines.append(f"**Best streak this week:** {max_streak} days in a row 🔥")
+        streak = _longest_streak(win_seq)
+        if streak >= 2:
+            lines.append(f"**Best streak:** {streak} days 🔥")
 
     lines += [
         "",
@@ -197,141 +224,9 @@ def format_weekly_summary(daily_results: list[DailyResult], week_start: date) ->
         "• What went well this week?",
         "• What do you want to focus on next week?",
         "",
-        "New series starts today — fresh slate. You've got this! 💪",
+        "Fresh slate this week. 💪",
     ]
     return "\n".join(lines)
-
-
-def build_weekly_embed(
-    daily_results: list[DailyResult],
-    week_start: date,
-    checkin_rows: list[PlayoffCheckin] | None = None,
-    series_history: list[PlayoffSeries] | None = None,
-) -> discord.Embed:
-    """Build a rich Discord embed for the Sunday weekly review.
-
-    Args:
-        daily_results: All DailyResult rows for the week (any order).
-        week_start: The Sunday that starts the week.
-        checkin_rows: Optional PlayoffCheckin rows for the week — used to
-            compute per-pillar completion rates per person.
-        series_history: Optional past PlayoffSeries rows (most recent first) to
-            render a "Recent Record" field showing the last few weeks' results.
-    """
-    by_date = {r.result_date: r for r in daily_results}
-    week_dates = [week_start + timedelta(days=i) for i in range(7)]
-
-    david_days = sum(1 for r in daily_results if r.david_complete)
-    steph_days = sum(1 for r in daily_results if r.steph_complete)
-    combined_wins = sum(1 for r in daily_results if r.won)
-    total_played = len(daily_results)
-
-    # Series status colour
-    final_status = finalize_series_status(daily_results) if daily_results else "lost"
-    if final_status == "won":
-        color = discord.Color.green()
-        status_line = f"🏆 **{combined_wins}–{total_played - combined_wins} — WON!**"
-    elif final_status == "lost":
-        color = discord.Color.red()
-        status_line = f"💀 **{combined_wins}–{total_played - combined_wins} — Lost**"
-    else:
-        color = discord.Color.blurple()
-        status_line = f"🔄 **{combined_wins}–{total_played - combined_wins} — Ongoing**"
-
-    week_end = week_start + timedelta(days=6)
-    embed = discord.Embed(
-        title=f"☀️ Sunday Weekly Review — {week_start.strftime('%b %d')}–{week_end.strftime('%b %d')}",
-        color=color,
-    )
-
-    if total_played == 0:
-        embed.description = "No check-ins recorded for last week."
-    else:
-        embed.description = status_line
-
-    # Day-by-day breakdown
-    day_lines: list[str] = []
-    win_sequence: list[bool] = []
-    for i, d in enumerate(week_dates):
-        label = f"{_DAY_NAMES[i]} {d.strftime('%m/%d')}"
-        if d in by_date:
-            r = by_date[d]
-            d_icon = "✅" if r.david_complete else "❌"
-            s_icon = "✅" if r.steph_complete else "❌"
-            result_label = "🏆" if r.won else "💔"
-            day_lines.append(f"`{label}` D:{d_icon} S:{s_icon} {result_label}")
-            win_sequence.append(r.won)
-        else:
-            day_lines.append(f"`{label}` —")
-            win_sequence.append(False)
-
-    if day_lines:
-        embed.add_field(name="Day-by-Day", value="\n".join(day_lines), inline=False)
-
-    # Best streak
-    max_streak = cur_streak = 0
-    for w in win_sequence:
-        if w:
-            cur_streak += 1
-            max_streak = max(max_streak, cur_streak)
-        else:
-            cur_streak = 0
-
-    # Per-person summaries (with optional per-pillar breakdown)
-    checkins = checkin_rows or []
-    david_checkins = [r for r in checkins if r.user_id == DAVID_ID]
-    steph_checkins = [r for r in checkins if r.user_id == STEPH_ID]
-
-    def _pillar_lines(user_checkins: list[PlayoffCheckin], pillars: list[str]) -> str:
-        total = len(user_checkins)
-        denom = total if total else 7
-        p_counts = [
-            sum(1 for r in user_checkins if getattr(r, f"pillar{j + 1}"))
-            for j in range(3)
-        ]
-        lines = [f"{'✅' if p_counts[j] == denom else '🔸'} {pillars[j][:40]}: {p_counts[j]}/{denom}" for j in range(3)]
-        return "\n".join(lines)
-
-    david_header = f"**David — {david_days}/7 days complete**"
-    if david_checkins:
-        david_body = _pillar_lines(david_checkins, DAVID_PILLARS)
-        embed.add_field(name=david_header, value=david_body, inline=True)
-    else:
-        embed.add_field(name=david_header, value=f"Days complete: {david_days}/7", inline=True)
-
-    steph_header = f"**Steph — {steph_days}/7 days complete**"
-    if steph_checkins:
-        steph_body = _pillar_lines(steph_checkins, STEPH_PILLARS)
-        embed.add_field(name=steph_header, value=steph_body, inline=True)
-    else:
-        embed.add_field(name=steph_header, value=f"Days complete: {steph_days}/7", inline=True)
-
-    if max_streak >= 2:
-        embed.add_field(
-            name="Best Streak",
-            value=f"🔥 {max_streak} days in a row!",
-            inline=False,
-        )
-
-    # Recent series history (last N weeks, sorted newest-first)
-    if series_history:
-        history_sorted = sorted(series_history, key=lambda s: s.week_start, reverse=True)
-        history_lines: list[str] = []
-        for s in history_sorted:
-            icon = "🏆" if s.status == "won" else "💀"
-            week_label = s.week_start.strftime("%b %d")
-            history_lines.append(f"{icon} {week_label}: {s.wins}–{s.losses}")
-        total_weeks = len(history_sorted)
-        wins_in_history = sum(1 for s in history_sorted if s.status == "won")
-        record_line = f"**{wins_in_history}W – {total_weeks - wins_in_history}L** over last {total_weeks} week{'s' if total_weeks != 1 else ''}"
-        embed.add_field(
-            name="Recent Record",
-            value=record_line + "\n" + "\n".join(history_lines),
-            inline=False,
-        )
-
-    embed.set_footer(text="Use /weekly_review to share your reflection • New series starts today — fresh slate! 💪")
-    return embed
 
 
 class WeeklyReviewModal(discord.ui.Modal, title="Weekly Review"):
@@ -355,19 +250,13 @@ class CheckinModal(discord.ui.Modal, title="Daily Check-in"):
         super().__init__()
         self._callback = callback
         self.p1 = discord.ui.TextInput(
-            label=pillar_names[0][:45],
-            placeholder="y or n",
-            max_length=3,
+            label=pillar_names[0][:45], placeholder="y or n", max_length=3,
         )
         self.p2 = discord.ui.TextInput(
-            label=pillar_names[1][:45],
-            placeholder="y or n",
-            max_length=3,
+            label=pillar_names[1][:45], placeholder="y or n", max_length=3,
         )
         self.p3 = discord.ui.TextInput(
-            label=pillar_names[2][:45],
-            placeholder="y or n",
-            max_length=3,
+            label=pillar_names[2][:45], placeholder="y or n", max_length=3,
         )
         self.add_item(self.p1)
         self.add_item(self.p2)
@@ -413,15 +302,40 @@ class Playoff(commands.Cog):
         pillar2: bool,
         pillar3: bool,
     ) -> None:
+        # Defer immediately so DB work has more than the 3-second interaction window.
+        # Without this the modal silently fails when DB calls take >3s.
+        try:
+            await interaction.response.defer()
+        except discord.errors.InteractionResponded:
+            pass
+
+        try:
+            await self._do_checkin(interaction, pillar1, pillar2, pillar3)
+        except Exception:
+            log.exception("checkin failed for user %s", interaction.user.id)
+            try:
+                await interaction.followup.send(
+                    "⚠️ Something went wrong saving your check-in. Try again in a moment.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+
+    async def _do_checkin(
+        self,
+        interaction: discord.Interaction,
+        pillar1: bool,
+        pillar2: bool,
+        pillar3: bool,
+    ) -> None:
         today = today_et()
         week_start = week_start_for(today)
         user_id = interaction.user.id
         guild_id = interaction.guild_id or 0
         pillar_names = get_pillar_names(user_id)
-        individual_win = pillar1 and pillar2 and pillar3
+        won_today = pillar1 and pillar2 and pillar3
 
         async with self.bot.db() as s:
-            # --- Step 1: upsert this user's individual check-in ---
             existing = await s.scalar(
                 select(PlayoffCheckin).where(
                     PlayoffCheckin.guild_id == guild_id,
@@ -447,120 +361,30 @@ class Playoff(commands.Cog):
                 )
             await s.commit()
 
-            # --- Step 2: if both players have checked in, settle today's combined result ---
-            david_checkin = await s.scalar(
-                select(PlayoffCheckin).where(
-                    PlayoffCheckin.guild_id == guild_id,
-                    PlayoffCheckin.user_id == DAVID_ID,
-                    PlayoffCheckin.checkin_date == today,
-                )
-            )
-            steph_checkin = await s.scalar(
-                select(PlayoffCheckin).where(
-                    PlayoffCheckin.guild_id == guild_id,
-                    PlayoffCheckin.user_id == STEPH_ID,
-                    PlayoffCheckin.checkin_date == today,
-                )
+            my_checkins = list(
+                (
+                    await s.scalars(
+                        select(PlayoffCheckin).where(
+                            PlayoffCheckin.guild_id == guild_id,
+                            PlayoffCheckin.user_id == user_id,
+                            PlayoffCheckin.checkin_date >= week_start,
+                            PlayoffCheckin.checkin_date <= week_start + timedelta(days=6),
+                        )
+                    )
+                ).all()
             )
 
-            today_result: DailyResult | None = None
-            is_new_settlement = False
-            if david_checkin and steph_checkin:
-                david_complete = (
-                    david_checkin.pillar1 and david_checkin.pillar2 and david_checkin.pillar3
-                )
-                steph_complete = (
-                    steph_checkin.pillar1 and steph_checkin.pillar2 and steph_checkin.pillar3
-                )
-                won_shared = david_complete and steph_complete
+        wins, losses = tally_user_week(my_checkins)
 
-                existing_result = await s.scalar(
-                    select(DailyResult).where(
-                        DailyResult.guild_id == guild_id,
-                        DailyResult.result_date == today,
-                    )
-                )
-                is_new_settlement = existing_result is None
-                if existing_result:
-                    existing_result.david_complete = david_complete
-                    existing_result.steph_complete = steph_complete
-                    existing_result.won = won_shared
-                    existing_result.updated_at = datetime.now(timezone.utc)
-                    today_result = existing_result
-                else:
-                    today_result = DailyResult(
-                        guild_id=guild_id,
-                        result_date=today,
-                        david_complete=david_complete,
-                        steph_complete=steph_complete,
-                        won=won_shared,
-                    )
-                    s.add(today_result)
-                await s.commit()
-
-            # --- Step 3: derive series tally from DailyResult rows (authoritative) ---
-            daily_results = (
-                await s.scalars(
-                    select(DailyResult).where(
-                        DailyResult.guild_id == guild_id,
-                        DailyResult.result_date >= week_start,
-                        DailyResult.result_date <= week_start + timedelta(days=6),
-                    )
-                )
-            ).all()
-
-            wins = sum(1 for r in daily_results if r.won)
-            losses = sum(1 for r in daily_results if not r.won)
-
-            if wins >= 4:
-                status = "won"
-            elif losses >= 4:
-                status = "lost"
-            else:
-                status = "ongoing"
-
-            # --- Step 4: upsert shared series record ---
-            series = await s.scalar(
-                select(PlayoffSeries).where(
-                    PlayoffSeries.guild_id == guild_id,
-                    PlayoffSeries.week_start == week_start,
-                )
-            )
-            if series:
-                series.wins = wins
-                series.losses = losses
-                series.status = status
-            else:
-                s.add(
-                    PlayoffSeries(
-                        guild_id=guild_id,
-                        week_start=week_start,
-                        wins=wins,
-                        losses=losses,
-                        status=status,
-                    )
-                )
-            await s.commit()
-
-        # --- Build response embed ---
-        # Combined result is the headline — a day only wins if BOTH complete everything.
-        # Individual completion is shown as context, not as the win/loss verdict.
-        if today_result is not None:
-            if today_result.won:
-                headline = "🏆 Day Win"
-                color = discord.Color.green()
-            else:
-                headline = "💔 Day Loss"
-                color = discord.Color.red()
+        if won_today:
+            headline = "🏆 Day Win"
+            color = discord.Color.green()
         else:
-            headline = "⏳ Waiting for partner"
-            color = discord.Color.blurple()
-
-        your_day = "✅ Your pillars: complete" if individual_win else "❌ Your pillars: incomplete"
+            headline = "💔 Day Loss"
+            color = discord.Color.red()
 
         embed = discord.Embed(
             title=f"{headline} — {today.strftime('%A, %b %d')}",
-            description=your_day,
             color=color,
         )
         embed.add_field(
@@ -571,247 +395,139 @@ class Playoff(commands.Cog):
             ),
             inline=False,
         )
-
-        # Combined result — only available once both players have checked in
-        if today_result is not None:
-            if today_result.won:
-                combined_text = "Both complete — you won the day together!"
-            else:
-                missed = []
-                if not today_result.david_complete:
-                    missed.append("David")
-                if not today_result.steph_complete:
-                    missed.append("Stephanie")
-                combined_text = f"{', '.join(missed)} didn't complete all pillars"
-        else:
-            combined_text = "Waiting for other player to check in..."
-
-        embed.add_field(name="Combined Result", value=combined_text, inline=False)
         embed.add_field(
-            name=f"Series — {wins}W {losses}L",
+            name=f"Your Week — {wins}W {losses}L",
             value=series_message(wins, losses),
             inline=False,
         )
-        await interaction.response.send_message(embed=embed)
 
-        # Cross-notify the other player when the day is first settled, so they
-        # don't have to manually check /playoff_status to see the combined result.
-        if is_new_settlement and today_result is not None:
-            other_id = STEPH_ID if user_id == DAVID_ID else DAVID_ID
-            if today_result.won:
-                notif = (
-                    f"<@{other_id}> 🏆 Day settled — **both complete!** "
-                    f"Series: **{wins}W {losses}L**"
-                )
-            else:
-                missed = []
-                if not today_result.david_complete:
-                    missed.append("David")
-                if not today_result.steph_complete:
-                    missed.append("Stephanie")
-                notif = (
-                    f"<@{other_id}> 💔 Day settled — "
-                    f"{', '.join(missed)} didn't complete all pillars. "
-                    f"Series: **{wins}W {losses}L**"
-                )
-            await interaction.followup.send(notif)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(
         name="playoff_status",
-        description="Check current series scores for both players",
+        description="Check both players' individual weekly scoreboards",
     )
     async def playoff_status(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         today = today_et()
         week_start = week_start_for(today)
         guild_id = interaction.guild_id or 0
+        week_end = week_start + timedelta(days=6)
 
         async with self.bot.db() as s:
-            series = await s.scalar(
-                select(PlayoffSeries).where(
-                    PlayoffSeries.guild_id == guild_id,
-                    PlayoffSeries.week_start == week_start,
-                )
-            )
-            wins = series.wins if series else 0
-            losses = series.losses if series else 0
-
-            today_result = await s.scalar(
-                select(DailyResult).where(
-                    DailyResult.guild_id == guild_id,
-                    DailyResult.result_date == today,
-                )
+            rows = list(
+                (
+                    await s.scalars(
+                        select(PlayoffCheckin).where(
+                            PlayoffCheckin.guild_id == guild_id,
+                            PlayoffCheckin.checkin_date >= week_start,
+                            PlayoffCheckin.checkin_date <= week_end,
+                        )
+                    )
+                ).all()
             )
 
-            # Only needed for the "waiting" state when no combined result yet
-            david_checkin = await s.scalar(
-                select(PlayoffCheckin).where(
-                    PlayoffCheckin.guild_id == guild_id,
-                    PlayoffCheckin.user_id == DAVID_ID,
-                    PlayoffCheckin.checkin_date == today,
-                )
-            )
-            steph_checkin = await s.scalar(
-                select(PlayoffCheckin).where(
-                    PlayoffCheckin.guild_id == guild_id,
-                    PlayoffCheckin.user_id == STEPH_ID,
-                    PlayoffCheckin.checkin_date == today,
-                )
-            )
+        by_user: dict[int, list[PlayoffCheckin]] = {}
+        for r in rows:
+            by_user.setdefault(r.user_id, []).append(r)
 
         embed = discord.Embed(
             title=f"🏆 Playoff Week — {week_start.strftime('Week of %b %d')}",
             color=discord.Color.blurple(),
         )
-        embed.add_field(
-            name=f"Stavid Series — {wins}W {losses}L",
-            value=series_message(wins, losses),
-            inline=False,
-        )
 
-        # Combined day result is authoritative once both players have checked in
-        if today_result is not None:
-            if today_result.won:
-                today_text = "🏆 **Shared WIN** — both complete!"
+        # Always show David and Stephanie (and any other partners with rows)
+        ordered_user_ids: list[int] = [DAVID_ID, STEPH_ID]
+        for uid in by_user.keys():
+            if uid not in ordered_user_ids:
+                ordered_user_ids.append(uid)
+
+        for uid in ordered_user_ids:
+            user_rows = by_user.get(uid, [])
+            wins, losses = tally_user_week(user_rows)
+            today_row = next((c for c in user_rows if c.checkin_date == today), None)
+            if today_row is None:
+                today_line = "⏳ Hasn't checked in today"
+            elif is_full_day_win(today_row):
+                today_line = "✅ Today: complete"
             else:
-                missed = []
-                if not today_result.david_complete:
-                    missed.append("David")
-                if not today_result.steph_complete:
-                    missed.append("Stephanie")
-                today_text = f"💀 **Shared LOSS** — {', '.join(missed)} didn't complete all pillars"
-            embed.add_field(name="Today's Combined Result", value=today_text, inline=False)
-        else:
-            # Day not yet settled — show individual check-in status
+                missed = sum(
+                    1 for v in (today_row.pillar1, today_row.pillar2, today_row.pillar3) if not v
+                )
+                today_line = f"❌ Today: {missed} pillar{'s' if missed != 1 else ''} missed"
             embed.add_field(
-                name="Today's Check-ins",
-                value=(
-                    f"David: {'✅ checked in' if david_checkin else '⏳ not yet'}\n"
-                    f"Stephanie: {'✅ checked in' if steph_checkin else '⏳ not yet'}"
-                ),
+                name=f"{_user_label(uid)} — {wins}W {losses}L",
+                value=f"{series_message(wins, losses)}\n{today_line}",
                 inline=False,
             )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(
         name="series_history",
-        description="View past series results",
+        description="View per-person weekly history (last 8 weeks)",
     )
     async def series_history(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild_id or 0
         today = today_et()
+        oldest = week_start_for(today) - timedelta(weeks=7)
 
         async with self.bot.db() as s:
-            rows = (
-                await s.scalars(
-                    select(PlayoffSeries)
-                    .where(PlayoffSeries.guild_id == guild_id)
-                    .order_by(PlayoffSeries.week_start.desc())
-                    .limit(8)
-                )
-            ).all()
-
-            if not rows:
-                await interaction.response.send_message(
-                    "No series history yet. Use `/checkin` to get started!",
-                    ephemeral=True,
-                )
-                return
-
-            # Fetch per-person completion data for all shown weeks in one query
-            oldest_week = rows[-1].week_start
-            newest_week_end = rows[0].week_start + timedelta(days=6)
-            daily_rows = (
-                await s.scalars(
-                    select(DailyResult)
-                    .where(
-                        DailyResult.guild_id == guild_id,
-                        DailyResult.result_date >= oldest_week,
-                        DailyResult.result_date <= newest_week_end,
+            rows = list(
+                (
+                    await s.scalars(
+                        select(PlayoffCheckin).where(
+                            PlayoffCheckin.guild_id == guild_id,
+                            PlayoffCheckin.checkin_date >= oldest,
+                        )
                     )
-                    .limit(200)
-                )
-            ).all()
-            checkin_rows_history = (
-                await s.scalars(
-                    select(PlayoffCheckin)
-                    .where(
-                        PlayoffCheckin.guild_id == guild_id,
-                        PlayoffCheckin.checkin_date >= oldest_week,
-                        PlayoffCheckin.checkin_date <= newest_week_end,
-                    )
-                    .limit(200)
-                )
-            ).all()
-
-            # Group DailyResult rows by the Sunday that started their week
-            daily_by_week: dict[date, list[DailyResult]] = {}
-            for dr in daily_rows:
-                ws = week_start_for(dr.result_date)
-                daily_by_week.setdefault(ws, []).append(dr)
-
-            # Group PlayoffCheckin rows by week (for stats computation)
-            checkins_by_week: dict[date, list[PlayoffCheckin]] = {}
-            for ci in checkin_rows_history:
-                ws = week_start_for(ci.checkin_date)
-                checkins_by_week.setdefault(ws, []).append(ci)
-
-            # Auto-heal stale "ongoing" status for fully completed past weeks.
-            # If the bot missed a Sunday review, old weeks stay "ongoing" forever
-            # unless we fix them here.  Also persist stats for any healed week
-            # that doesn't have them yet.
-            needs_commit = False
-            for row in rows:
-                week_end = row.week_start + timedelta(days=6)
-                is_past = week_end < today
-                if is_past and row.status == "ongoing":
-                    week_daily = daily_by_week.get(row.week_start, [])
-                    row.wins = sum(1 for dr in week_daily if dr.won)
-                    row.losses = sum(1 for dr in week_daily if not dr.won)
-                    row.status = finalize_series_status(week_daily)
-                    week_checkins = checkins_by_week.get(row.week_start, [])
-                    stats = _compute_weekly_stats(week_daily, week_checkins, row.week_start)
-                    for key, val in stats.items():
-                        setattr(row, key, val)
-                    needs_commit = True
-                elif is_past and row.david_days is None:
-                    # Week already finalized but stats not yet persisted (pre-migration row).
-                    week_daily = daily_by_week.get(row.week_start, [])
-                    week_checkins = checkins_by_week.get(row.week_start, [])
-                    stats = _compute_weekly_stats(week_daily, week_checkins, row.week_start)
-                    for key, val in stats.items():
-                        setattr(row, key, val)
-                    needs_commit = True
-            if needs_commit:
-                await s.commit()
-
-        icons = {"won": "🏆", "lost": "💀", "ongoing": "🔄"}
-        lines = []
-        for r in rows:
-            icon = icons.get(r.status, "❓")
-            # Use persisted stats when available; fall back to live computation
-            # for the current (ongoing) week or pre-migration rows.
-            if r.david_days is not None:
-                david_days = r.david_days
-                steph_days = r.steph_days
-            else:
-                week_daily = daily_by_week.get(r.week_start, [])
-                david_days = sum(1 for dr in week_daily if dr.david_complete)
-                steph_days = sum(1 for dr in week_daily if dr.steph_complete)
-            lines.append(
-                f"{icon} Week of {r.week_start.strftime('%b %d')} — "
-                f"**{r.wins}–{r.losses}** ({r.status})"
-                f"  D:{david_days}/7 S:{steph_days}/7"
+                ).all()
             )
 
-        won_count = sum(1 for r in rows if r.status == "won")
+        if not rows:
+            await interaction.followup.send(
+                "No check-ins yet. Use `/checkin` to get started!", ephemeral=True
+            )
+            return
+
+        # Group: user -> week_start -> [checkins]
+        by_user_week: dict[int, dict[date, list[PlayoffCheckin]]] = {}
+        for r in rows:
+            ws = week_start_for(r.checkin_date)
+            by_user_week.setdefault(r.user_id, {}).setdefault(ws, []).append(r)
+
+        ordered_user_ids: list[int] = [DAVID_ID, STEPH_ID]
+        for uid in by_user_week.keys():
+            if uid not in ordered_user_ids:
+                ordered_user_ids.append(uid)
+
         embed = discord.Embed(
-            title="📊 Stavid Series History",
-            description="\n".join(lines),
+            title="📊 Weekly History (per person)",
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text=f"Won {won_count} of {len(rows)} series shown")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        for uid in ordered_user_ids:
+            weeks = by_user_week.get(uid, {})
+            if not weeks:
+                embed.add_field(name=_user_label(uid), value="No check-ins yet.", inline=False)
+                continue
+            ordered_weeks = sorted(weeks.keys(), reverse=True)[:8]
+            lines = []
+            won_count = 0
+            for ws in ordered_weeks:
+                w_checkins = weeks[ws]
+                wins, losses = tally_user_week(w_checkins)
+                status = finalize_user_status(w_checkins)
+                icon = "🏆" if status == "won" else "💀"
+                if status == "won":
+                    won_count += 1
+                lines.append(
+                    f"{icon} Week of {ws.strftime('%b %d')} — **{wins}–{losses}** ({status})"
+                )
+            lines.append(f"_Won {won_count} of {len(ordered_weeks)} weeks shown_")
+            embed.add_field(name=_user_label(uid), value="\n".join(lines), inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="weekly_review",
@@ -824,6 +540,11 @@ class Playoff(commands.Cog):
     async def _save_weekly_review(
         self, interaction: discord.Interaction, text: str
     ) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.errors.InteractionResponded:
+            pass
+
         week_of = week_start_for(today_et())
         guild_id = interaction.guild_id or 0
         user_id = interaction.user.id
@@ -849,7 +570,7 @@ class Playoff(commands.Cog):
                 )
             await s.commit()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Reflection saved for the week of {week_of.strftime('%b %d')}!",
             ephemeral=True,
         )
@@ -903,7 +624,7 @@ class Playoff(commands.Cog):
 
     @tasks.loop(hours=1)
     async def sunday_review(self) -> None:
-        """On Sunday at 10 am ET, post a weekly review prompt."""
+        """On Sunday at 10 am ET, post a per-user weekly review embed for each player."""
         now_et = datetime.now(ET)
         today = now_et.date()
 
@@ -924,24 +645,7 @@ class Playoff(commands.Cog):
         async with self.bot.db() as s:
             rows = list(
                 (
-                    await s.execute(
-                        select(DailyResult).where(
-                            DailyResult.guild_id == guild_id,
-                            DailyResult.result_date >= prev_week_start,
-                            DailyResult.result_date
-                            <= prev_week_start + timedelta(days=6),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-            # Fetch per-person checkin rows — needed for pillar breakdown in the
-            # embed AND for persisting per-pillar stats on the series record.
-            checkin_rows = list(
-                (
-                    await s.execute(
+                    await s.scalars(
                         select(PlayoffCheckin).where(
                             PlayoffCheckin.guild_id == guild_id,
                             PlayoffCheckin.checkin_date >= prev_week_start,
@@ -949,66 +653,16 @@ class Playoff(commands.Cog):
                             <= prev_week_start + timedelta(days=6),
                         )
                     )
-                )
-                .scalars()
-                .all()
+                ).all()
             )
 
-            # Finalize the previous week's series record so history is accurate
-            # even for weeks that didn't hit 4 wins/losses before the week ended.
-            # Also persist per-person, per-pillar, and streak stats for historical queries.
-            if rows:
-                wins_final = sum(1 for r in rows if r.won)
-                losses_final = sum(1 for r in rows if not r.won)
-                final_status = finalize_series_status(rows)
-                stats = _compute_weekly_stats(rows, checkin_rows, prev_week_start)
+        by_user: dict[int, list[PlayoffCheckin]] = {}
+        for r in rows:
+            by_user.setdefault(r.user_id, []).append(r)
 
-                prev_series = await s.scalar(
-                    select(PlayoffSeries).where(
-                        PlayoffSeries.guild_id == guild_id,
-                        PlayoffSeries.week_start == prev_week_start,
-                    )
-                )
-                if prev_series:
-                    prev_series.wins = wins_final
-                    prev_series.losses = losses_final
-                    prev_series.status = final_status
-                    for key, val in stats.items():
-                        setattr(prev_series, key, val)
-                else:
-                    s.add(
-                        PlayoffSeries(
-                            guild_id=guild_id,
-                            week_start=prev_week_start,
-                            wins=wins_final,
-                            losses=losses_final,
-                            status=final_status,
-                            **stats,
-                        )
-                    )
-                await s.commit()
-
-            # Fetch the last 4 completed series weeks (excluding current week)
-            history_cutoff = prev_week_start - timedelta(weeks=4)
-            recent_series = list(
-                (
-                    await s.execute(
-                        select(PlayoffSeries)
-                        .where(
-                            PlayoffSeries.guild_id == guild_id,
-                            PlayoffSeries.week_start >= history_cutoff,
-                            PlayoffSeries.week_start < prev_week_start,
-                        )
-                        .order_by(PlayoffSeries.week_start.desc())
-                        .limit(4)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-        embed = build_weekly_embed(rows, prev_week_start, checkin_rows, recent_series or None)
-        await channel.send(embed=embed)
+        for uid in (DAVID_ID, STEPH_ID):
+            embed = build_user_weekly_embed(uid, by_user.get(uid, []), prev_week_start)
+            await channel.send(embed=embed)
 
     @sunday_review.before_loop
     async def before_sunday_review(self) -> None:
