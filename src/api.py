@@ -10,6 +10,7 @@ Stavid to a second guild, this needs a guild_id query param.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import secrets
 from datetime import datetime
@@ -17,7 +18,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
 from src.db import (
     BucketListItem,
@@ -25,6 +26,7 @@ from src.db import (
     OutingWishlistItem,
     ReminderEntry,
     ShoppingItem,
+    SupplyItem,
     WatchlistItem,
 )
 
@@ -212,6 +214,19 @@ def create_app(sessionmaker) -> FastAPI:
             if row is None or row.guild_id != GUILD_ID:
                 raise HTTPException(404, f"Shopping item {item_id} not found")
             row.bought = True
+
+            # Mirror /shopping remove: if the item maps to a tracked supply
+            # by name, update the supply's last_bought_at so the weekly
+            # supply check shows current cadence even when bought via Sage.
+            supply = await s.scalar(
+                select(SupplyItem).where(
+                    SupplyItem.guild_id == row.guild_id,
+                    func.lower(SupplyItem.name) == row.name.lower(),
+                )
+            )
+            if supply is not None:
+                supply.last_bought_at = _dt.date.today()
+
             await s.commit()
             await s.refresh(row)
         return ShoppingOut(
