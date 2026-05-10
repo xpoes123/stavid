@@ -33,6 +33,7 @@ ET = ZoneInfo("America/New_York")
 ALLOWED_RECURRENCES = ("weekly", "monthly")
 WEEKLY_CHANNEL_NAME = "weekly-chores"
 MONTHLY_CHANNEL_NAME = "monthly-chores"
+DEFAULT_REMIND_HOUR_ET = 9  # 9 AM ET; override via CHORE_REMIND_HOUR env var
 
 # Map each partner to the other so "alternate" rotation works without env config.
 _PARTNER: dict[int, int] = {DAVID_ID: STEPH_ID, STEPH_ID: DAVID_ID}
@@ -59,6 +60,77 @@ def next_due_for(recurrence: str, today: _dt.date) -> _dt.date:
     raise ValueError(f"unknown recurrence: {recurrence!r}")
 
 
+def bucket_by_recurrence(
+    rows: list[ChoreInstance], templates: dict[int, ChoreTemplate]
+) -> tuple[list[ChoreInstance], list[ChoreInstance]]:
+    """Split chore instances into (weekly_bucket, monthly_bucket).
+
+    Monthly instances go to the monthly bucket; everything else (weekly
+    recurrences AND one-offs with template_id=NULL) goes to the weekly
+    bucket so #weekly-chores is the default home.
+    """
+    weekly: list[ChoreInstance] = []
+    monthly: list[ChoreInstance] = []
+    for r in rows:
+        if r.template_id is None:
+            weekly.append(r)
+            continue
+        tmpl = templates.get(r.template_id)
+        if tmpl is not None and tmpl.recurrence == "monthly":
+            monthly.append(r)
+        else:
+            weekly.append(r)
+    return weekly, monthly
+
+
+def build_chore_digest(
+    kind: str, rows: list[ChoreInstance], today: _dt.date
+) -> discord.Embed:
+    """Build the per-channel daily digest embed.
+
+    ``kind`` is "Weekly" or "Monthly" — used in the title only.
+    ``rows`` should already be filtered to due-today + overdue and
+    bucketed for this channel by ``bucket_by_recurrence``.
+    """
+    by_assignee: dict[int, list[ChoreInstance]] = {}
+    for r in rows:
+        by_assignee.setdefault(r.assignee_id, []).append(r)
+
+    overdue_count = sum(1 for r in rows if r.due_date < today)
+    today_count = sum(1 for r in rows if r.due_date == today)
+
+    summary_bits = []
+    if today_count:
+        summary_bits.append(f"**{today_count}** due today")
+    if overdue_count:
+        summary_bits.append(f"**{overdue_count}** overdue")
+    summary = " · ".join(summary_bits) if summary_bits else "All clear."
+
+    embed = discord.Embed(
+        title=f"🧹 {kind} chores — daily reminder",
+        description=summary,
+        color=discord.Color.orange() if overdue_count else discord.Color.blurple(),
+    )
+
+    for uid, items in by_assignee.items():
+        lines = []
+        for r in sorted(items, key=lambda x: x.due_date):
+            if r.due_date < today:
+                days_late = (today - r.due_date).days
+                tag = f"⚠️ {days_late}d overdue"
+            else:
+                tag = "📅 due today"
+            lines.append(f"`#{r.id}` {r.name} — {tag}")
+        embed.add_field(
+            name=f"<@{uid}> ({len(items)})",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    embed.set_footer(text="Use /chore complete <id> when you're done.")
+    return embed
+
+
 def pick_next_assignee(template: ChoreTemplate) -> int:
     """Return the user_id who should be assigned the next instance.
 
@@ -82,10 +154,13 @@ class Chores(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
         self._materialized_dates: set[_dt.date] = set()
+        self._reminded_dates: set[_dt.date] = set()
         self.materialize_loop.start()
+        self.reminder_loop.start()
 
     def cog_unload(self) -> None:
         self.materialize_loop.cancel()
+        self.reminder_loop.cancel()
 
     chore = app_commands.Group(name="chore", description="Chore tracker")
 
@@ -460,6 +535,90 @@ class Chores(commands.Cog):
     @materialize_loop.before_loop
     async def _before_materialize_loop(self) -> None:
         await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------ #
+    # Reminder loop                                                        #
+    # ------------------------------------------------------------------ #
+
+    @tasks.loop(hours=1)
+    async def reminder_loop(self) -> None:
+        """Once per day at the configured hour, post a digest of due/overdue chores.
+
+        Posts a separate embed in #weekly-chores and #monthly-chores listing
+        each assignee's chores. One-offs (template_id=NULL) go in the weekly
+        channel. Skips entirely if no chores are due/overdue.
+        """
+        now_et = datetime.now(ET)
+        today = now_et.date()
+
+        try:
+            target_hour = int(os.getenv("CHORE_REMIND_HOUR", str(DEFAULT_REMIND_HOUR_ET)))
+        except ValueError:
+            target_hour = DEFAULT_REMIND_HOUR_ET
+
+        if now_et.hour != target_hour or today in self._reminded_dates:
+            return
+        self._reminded_dates.add(today)
+
+        for guild in self.bot.guilds:
+            try:
+                await self._send_chore_digest(guild, today)
+            except Exception:
+                log.exception("chore digest failed for guild %s", guild.id)
+
+        # Cap memory to last 30 days.
+        if len(self._reminded_dates) > 30:
+            self._reminded_dates = {
+                d for d in self._reminded_dates if (today - d).days < 30
+            }
+
+    @reminder_loop.before_loop
+    async def _before_reminder_loop(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _send_chore_digest(self, guild: discord.Guild, today: _dt.date) -> None:
+        weekly_channel = discord.utils.get(guild.text_channels, name=WEEKLY_CHANNEL_NAME)
+        monthly_channel = discord.utils.get(guild.text_channels, name=MONTHLY_CHANNEL_NAME)
+        if weekly_channel is None and monthly_channel is None:
+            return
+
+        async with self.bot.db() as s:
+            rows = list(
+                (
+                    await s.scalars(
+                        select(ChoreInstance)
+                        .where(
+                            ChoreInstance.guild_id == guild.id,
+                            ChoreInstance.completed == False,  # noqa: E712
+                            ChoreInstance.due_date <= today,
+                        )
+                        .order_by(ChoreInstance.due_date)
+                    )
+                ).all()
+            )
+            if not rows:
+                return
+
+            template_ids = {r.template_id for r in rows if r.template_id is not None}
+            templates: dict[int, ChoreTemplate] = {}
+            if template_ids:
+                tlist = (
+                    await s.scalars(
+                        select(ChoreTemplate).where(ChoreTemplate.id.in_(template_ids))
+                    )
+                ).all()
+                templates = {t.id: t for t in tlist}
+
+        weekly_rows, monthly_rows = bucket_by_recurrence(rows, templates)
+
+        if weekly_channel is not None and weekly_rows:
+            await weekly_channel.send(
+                embed=build_chore_digest("Weekly", weekly_rows, today)
+            )
+        if monthly_channel is not None and monthly_rows:
+            await monthly_channel.send(
+                embed=build_chore_digest("Monthly", monthly_rows, today)
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
