@@ -13,7 +13,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from src.db import create_sessionmaker, init_db  # ← updated import
+from src.db import create_sessionmaker
 
 TEST_GUILD_ID = 1401585357799292958
 COGS_PACKAGE = "src.cogs"
@@ -57,12 +57,36 @@ async def main() -> None:
     if not token:
         raise RuntimeError("Missing DISCORD_TOKEN in env")
 
-    SessionLocal = create_sessionmaker(echo=False)  # ← no arg now
-    await init_db(SessionLocal)  # ← create tables
+    SessionLocal = create_sessionmaker(echo=False)
 
     bot = StavidBot(discord.Intents.default(), SessionLocal)
-    async with bot:
-        await bot.start(token)
+
+    # Optional local HTTP API for Sage. Bound to 127.0.0.1 only — only
+    # processes on this same VPS can reach it. Skipped silently if no
+    # STAVID_API_TOKEN is set so dev runs aren't forced to wire this up.
+    api_task = None
+    if os.getenv("STAVID_API_TOKEN"):
+        import uvicorn
+
+        from src.api import create_app
+
+        api_host = os.getenv("STAVID_API_HOST", "127.0.0.1")
+        api_port = int(os.getenv("STAVID_API_PORT", "7780"))
+        app = create_app(SessionLocal)
+        config = uvicorn.Config(
+            app, host=api_host, port=api_port,
+            log_level="warning", access_log=False,
+        )
+        server = uvicorn.Server(config)
+        api_task = asyncio.create_task(server.serve())
+        logging.info("Stavid API listening on %s:%d", api_host, api_port)
+
+    try:
+        async with bot:
+            await bot.start(token)
+    finally:
+        if api_task is not None:
+            api_task.cancel()
 
 
 if __name__ == "__main__":
