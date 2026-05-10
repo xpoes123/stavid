@@ -12,7 +12,10 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from src.db import ShoppingItem
+import datetime as _dt
+from sqlalchemy import func
+
+from src.db import ShoppingItem, SupplyItem
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
@@ -222,6 +225,19 @@ class Shopping(commands.Cog):
                 return
             name = row.og_title or row.name
             row.bought = True
+
+            # If this shopping item maps to a tracked supply (case-insensitive
+            # name match within the guild), record today as its last-bought
+            # date so the weekly supply check shows current cadence.
+            supply = await s.scalar(
+                select(SupplyItem).where(
+                    SupplyItem.guild_id == row.guild_id,
+                    func.lower(SupplyItem.name) == row.name.lower(),
+                )
+            )
+            if supply is not None:
+                supply.last_bought_at = _dt.date.today()
+
             await s.commit()
 
         await interaction.response.send_message(

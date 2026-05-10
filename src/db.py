@@ -336,6 +336,10 @@ class SupplyItem(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Date this supply was most recently restocked. Updated when a shopping
+    # item with a matching name is marked bought (via /shopping remove or
+    # the Sage API). NULL = never bought (or pre-existing rows).
+    last_bought_at: Mapped[_dt.date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
