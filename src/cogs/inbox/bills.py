@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 import typing as t
 
 import discord
@@ -18,7 +20,6 @@ from src.cogs.inbox._utils import (
 )
 from src.db import LedgerEntry
 from src.utils import DAVID_ID, STEPH_ID
-import os
 
 if t.TYPE_CHECKING:
     from src.main import StavidBot
@@ -26,9 +27,30 @@ if t.TYPE_CHECKING:
 CHANNEL = "bills"
 log = logging.getLogger(__name__)
 
+# Leading direction phrases that flip the default creditor/debtor roles.
+# Default: author = creditor (partner owes author).
+# Flip:    author = debtor  (author owes partner) — set when the author is
+#          recording a payment they made or a debt they themselves carry.
+_FLIP_PATTERNS = [
+    re.compile(r"^\s*i\s+paid\b", re.IGNORECASE),
+    re.compile(r"^\s*i\s+owe\b", re.IGNORECASE),
+    re.compile(r"^\s*i\s+gave\b", re.IGNORECASE),
+    re.compile(r"^\s*paid\s+\S+", re.IGNORECASE),
+    re.compile(r"^\s*owe\s+\S+", re.IGNORECASE),
+    re.compile(r"^\s*gave\s+\S+", re.IGNORECASE),
+]
 
-def _resolve_debtor_id(creator_id: int) -> int:
-    """The creditor is the message author; the debtor is the other partner."""
+
+def author_is_debtor(content: str) -> bool:
+    """True when the message starts with a phrase that flips the ledger direction.
+
+    See ``_FLIP_PATTERNS`` for the recognised forms.
+    """
+    return any(p.match(content) for p in _FLIP_PATTERNS)
+
+
+def _partner_id(creator_id: int) -> int:
+    """Return the other partner's user ID, falling back to creator if alone."""
     raw = os.getenv("PARTNER_IDS", "")
     ids: list[int] = []
     if raw:
@@ -66,13 +88,17 @@ class BillsInbox(commands.Cog):
                     note_parts.append(f"(due {due_at.strftime('%Y-%m-%d')})")
 
             note = " ".join(note_parts)
-            debtor_id = _resolve_debtor_id(message.author.id)
+            partner_id = _partner_id(message.author.id)
+            if author_is_debtor(content):
+                creditor_id, debtor_id = partner_id, message.author.id
+            else:
+                creditor_id, debtor_id = message.author.id, partner_id
 
             async with self.bot.db() as s:
                 s.add(
                     LedgerEntry(
                         guild_id=message.guild.id,
-                        creditor_id=message.author.id,
+                        creditor_id=creditor_id,
                         debtor_id=debtor_id,
                         amount_cents=amount_cents,
                         note=note,
