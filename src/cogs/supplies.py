@@ -14,9 +14,46 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import func, select
 
-from src.db import SupplyCheckResult, SupplyItem
+from src.db import ShoppingItem, SupplyCheckResult, SupplyItem
 
 _CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "supply_items.json"
+
+# Default channel where the weekly supply check posts. Override with the
+# SUPPLY_CHECK_CHANNEL_ID env var.
+DEFAULT_SUPPLY_CHECK_CHANNEL_ID = 1401586024374603776
+
+
+def _supply_check_channel_id() -> int | None:
+    raw = os.getenv("SUPPLY_CHECK_CHANNEL_ID")
+    if raw and raw.isdigit():
+        return int(raw)
+    return DEFAULT_SUPPLY_CHECK_CHANNEL_ID
+
+
+def _format_last_bought(last: date | None, today: date) -> str:
+    """Return a parenthetical "(last bought N weeks/days/etc ago)" suffix.
+
+    Returns the empty string when ``last`` is None — embed callers can append
+    it unconditionally.
+    """
+    if last is None:
+        return ""
+    days = (today - last).days
+    if days < 0:
+        return ""
+    if days == 0:
+        when = "today"
+    elif days == 1:
+        when = "yesterday"
+    elif days < 14:
+        when = f"{days} days ago"
+    elif days < 30:
+        weeks = days // 7
+        when = f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    else:
+        months = days // 30
+        when = f"{months} month{'s' if months != 1 else ''} ago"
+    return f" _(last bought {when})_"
 
 
 def _load_default_items(path: Path = _CONFIG_PATH) -> list[str]:
@@ -63,21 +100,24 @@ def _build_status_embed(
     items: list[SupplyItem],
     flagged_item_ids: set[int],
     week_of: date,
+    today: date | None = None,
 ) -> discord.Embed:
-    """Build the supply check embed showing current flag status."""
+    """Build the supply check embed showing current flag status + last-bought tags."""
+    today = today or datetime.now(ET).date()
     lines = []
     for item in items:
+        suffix = _format_last_bought(item.last_bought_at, today)
         if item.id in flagged_item_ids:
-            lines.append(f"🔴 ~~{item.name}~~ _needs restock_")
+            lines.append(f"🔴 ~~{item.name}~~ _needs restock_{suffix}")
         else:
-            lines.append(f"• {item.name}")
+            lines.append(f"• {item.name}{suffix}")
 
     embed = discord.Embed(
         title=f"🛒 Weekly Supply Check — {week_of.strftime('week of %b %d')}",
         description="\n".join(lines) if lines else "_No items tracked yet._",
         color=discord.Color.blue(),
     )
-    embed.set_footer(text="Select items below that are running low!")
+    embed.set_footer(text="Select items below that are running low — they'll be added to the shopping list.")
     return embed
 
 
@@ -153,10 +193,15 @@ class SupplySelectMenu(discord.ui.Select):
 
         newly_flagged: list[str] = []
         already_flagged: list[str] = []
+        already_on_list: list[str] = []
         item_by_id = {item.id: item for item in self.all_items}
 
         async with self.db() as s:
             for item_id in selected_ids:
+                item = item_by_id.get(item_id)
+                if item is None:
+                    continue
+
                 existing = await s.scalar(
                     select(SupplyCheckResult).where(
                         SupplyCheckResult.guild_id == self.guild_id,
@@ -166,9 +211,7 @@ class SupplySelectMenu(discord.ui.Select):
                     )
                 )
                 if existing:
-                    item = item_by_id.get(item_id)
-                    if item:
-                        already_flagged.append(item.name)
+                    already_flagged.append(item.name)
                     continue
 
                 s.add(
@@ -179,9 +222,31 @@ class SupplySelectMenu(discord.ui.Select):
                         user_id=user_id,
                     )
                 )
-                item = item_by_id.get(item_id)
-                if item:
-                    newly_flagged.append(item.name)
+                newly_flagged.append(item.name)
+
+                # Mirror the flag onto the shopping list, using the supply name
+                # so /shopping remove can match it back to the supply row and
+                # update last_bought_at. Skip if there's already an unbought
+                # shopping item with the same name — don't create duplicates.
+                already_open = await s.scalar(
+                    select(ShoppingItem).where(
+                        ShoppingItem.guild_id == self.guild_id,
+                        func.lower(ShoppingItem.name) == item.name.lower(),
+                        ShoppingItem.bought == False,  # noqa: E712
+                    )
+                )
+                if already_open is None:
+                    s.add(
+                        ShoppingItem(
+                            guild_id=self.guild_id,
+                            name=item.name,
+                            link="",
+                            note="supply",
+                            added_by=user_id,
+                        )
+                    )
+                else:
+                    already_on_list.append(item.name)
 
             await s.commit()
 
@@ -202,7 +267,12 @@ class SupplySelectMenu(discord.ui.Select):
         # Build response message
         parts = []
         if newly_flagged:
-            parts.append(f"Flagged for restock: {', '.join(newly_flagged)}")
+            parts.append(f"🛒 Added to the shopping list: {', '.join(newly_flagged)}")
+        if already_on_list:
+            parts.append(
+                f"Already on the shopping list (no duplicate added): "
+                f"{', '.join(already_on_list)}"
+            )
         if already_flagged:
             parts.append(f"Already flagged (skipped): {', '.join(already_flagged)}")
         if not newly_flagged and not already_flagged:
@@ -403,12 +473,14 @@ class Supplies(commands.Cog):
             ).all()
 
         restock_counts = {row.item_id: row.cnt for row in restock_rows}
+        today = datetime.now(ET).date()
 
         lines = []
         for item in items:
+            last = _format_last_bought(item.last_bought_at, today)
             count = restock_counts.get(item.id, 0)
-            freq = f" _(restocked {count}x in last 4 wks)_" if count else ""
-            lines.append(f"• {item.name}{freq}")
+            freq = f" · restocked {count}x last 4w" if count else ""
+            lines.append(f"• {item.name}{last}{freq}")
 
         embed = discord.Embed(
             title="🛒 Supply Checklist",
@@ -511,7 +583,7 @@ class Supplies(commands.Cog):
 
     @tasks.loop(hours=1)
     async def weekly_supply_check(self) -> None:
-        """Every Sunday at 10am ET, post the supply checklist to the channel."""
+        """Every Sunday at 10am ET, post the supply checklist to the supply channel."""
         now_et = datetime.now(ET)
         today = now_et.date()
 
@@ -520,10 +592,10 @@ class Supplies(commands.Cog):
             return
         self._checked_sundays.add(today)
 
-        channel_id = os.getenv("CHECKIN_CHANNEL_ID")
-        if not channel_id or not channel_id.isdigit():
+        chan_id = _supply_check_channel_id()
+        if chan_id is None:
             return
-        channel = self.bot.get_channel(int(channel_id))
+        channel = self.bot.get_channel(chan_id)
         if channel is None:
             return
 

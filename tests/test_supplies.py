@@ -268,3 +268,93 @@ async def test_seed_skips_soft_deleted_items(db_session):
     )
     assert row is not None
     assert row.active is False  # still inactive
+
+
+# ---------------------------------------------------------------------------
+# _format_last_bought — display copy for the embed
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date  # noqa: E402
+
+from src.cogs.supplies import _format_last_bought  # noqa: E402
+
+
+def test_format_last_bought_none_returns_empty():
+    assert _format_last_bought(None, _date(2026, 5, 10)) == ""
+
+
+def test_format_last_bought_today():
+    out = _format_last_bought(_date(2026, 5, 10), _date(2026, 5, 10))
+    assert "today" in out
+
+
+def test_format_last_bought_yesterday():
+    out = _format_last_bought(_date(2026, 5, 9), _date(2026, 5, 10))
+    assert "yesterday" in out
+
+
+def test_format_last_bought_recent_days():
+    """Within 14 days, display in days for precision."""
+    out = _format_last_bought(_date(2026, 5, 5), _date(2026, 5, 10))
+    assert "5 days" in out
+
+
+def test_format_last_bought_weeks():
+    """14–29 days renders as a week count."""
+    out = _format_last_bought(_date(2026, 4, 23), _date(2026, 5, 10))  # 17 days
+    assert "weeks" in out
+    assert "ago" in out
+
+
+def test_format_last_bought_pluralised_weeks():
+    """2 weeks ago — pluralisation is right."""
+    out = _format_last_bought(_date(2026, 4, 26), _date(2026, 5, 10))  # 14 days
+    assert "2 weeks" in out
+
+
+def test_format_last_bought_months():
+    """At 30+ days, switch to months."""
+    out = _format_last_bought(_date(2026, 2, 1), _date(2026, 5, 10))  # ~98 days
+    assert "month" in out
+
+
+def test_format_last_bought_singular_month():
+    """31 days = 1 month, singular."""
+    out = _format_last_bought(_date(2026, 5, 9), _date(2026, 6, 9))  # 31 days
+    assert "1 month" in out
+    assert " months" not in out
+
+
+def test_format_last_bought_future_date_returns_empty():
+    """Defensive — a future last_bought_at means clock skew, not real usage."""
+    assert _format_last_bought(_date(2026, 5, 11), _date(2026, 5, 10)) == ""
+
+
+# ---------------------------------------------------------------------------
+# DB persistence: SupplyItem.last_bought_at
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_supply_item_last_bought_at_defaults_to_null(db_session):
+    db_session.add(SupplyItem(guild_id=GUILD_ID, name="Sponges", active=True))
+    await db_session.commit()
+    row = await db_session.scalar(
+        select(SupplyItem).where(SupplyItem.guild_id == GUILD_ID)
+    )
+    assert row.last_bought_at is None
+
+
+@pytest.mark.asyncio
+async def test_supply_item_last_bought_at_persists(db_session):
+    db_session.add(
+        SupplyItem(
+            guild_id=GUILD_ID, name="Toothpaste", active=True,
+            last_bought_at=_date(2026, 4, 30),
+        )
+    )
+    await db_session.commit()
+    row = await db_session.scalar(
+        select(SupplyItem).where(SupplyItem.guild_id == GUILD_ID)
+    )
+    assert row.last_bought_at == _date(2026, 4, 30)
