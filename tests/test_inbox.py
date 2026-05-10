@@ -1,0 +1,184 @@
+"""Tests for inbox cog parsers (no Discord interaction — pure parsing)."""
+from __future__ import annotations
+
+import pytest
+
+from src.cogs.inbox._utils import (
+    first_url,
+    parse_dollars_cents,
+    parse_when,
+    split_when_phrase,
+)
+from src.cogs.inbox.groceries import parse_grocery_message
+
+
+# ---------------------------------------------------------------------------
+# Grocery parser
+# ---------------------------------------------------------------------------
+
+
+def test_groceries_split_on_commas():
+    assert parse_grocery_message("milk, eggs, bread") == ["milk", "eggs", "bread"]
+
+
+def test_groceries_split_on_newlines():
+    assert parse_grocery_message("milk\neggs\nbread") == ["milk", "eggs", "bread"]
+
+
+def test_groceries_mixed_separators():
+    out = parse_grocery_message("milk, eggs\nbread, butter")
+    assert out == ["milk", "eggs", "bread", "butter"]
+
+
+def test_groceries_strips_whitespace():
+    assert parse_grocery_message("  milk  ,  eggs  ") == ["milk", "eggs"]
+
+
+def test_groceries_drops_empty_entries():
+    assert parse_grocery_message("milk,, , eggs,") == ["milk", "eggs"]
+
+
+def test_groceries_empty_raises():
+    from src.cogs.inbox._utils import ParseError
+    with pytest.raises(ParseError):
+        parse_grocery_message("   ,, \n\n  ,  ")
+
+
+def test_groceries_single_item():
+    assert parse_grocery_message("milk") == ["milk"]
+
+
+# ---------------------------------------------------------------------------
+# URL extraction
+# ---------------------------------------------------------------------------
+
+
+def test_first_url_https():
+    assert first_url("check out https://example.com cool") == "https://example.com"
+
+
+def test_first_url_strips_trailing_punct():
+    assert first_url("(see https://example.com).") == "https://example.com"
+
+
+def test_first_url_none():
+    assert first_url("no link here") is None
+
+
+def test_first_url_amazon():
+    url = "https://www.amazon.com/dp/B0123/ref=foo"
+    assert first_url(f"want this: {url}") == url
+
+
+# ---------------------------------------------------------------------------
+# Money parser
+# ---------------------------------------------------------------------------
+
+
+def test_dollars_with_dollar_sign():
+    assert parse_dollars_cents("$23.50 dinner") == 2350
+
+
+def test_dollars_without_dollar_sign():
+    assert parse_dollars_cents("rent 1500") == 150000
+
+
+def test_dollars_with_thousand_sep():
+    assert parse_dollars_cents("$1,200 rent") == 120000
+
+
+def test_dollars_no_match():
+    assert parse_dollars_cents("no money here") is None
+
+
+def test_dollars_first_match_wins():
+    assert parse_dollars_cents("$10 plus $20") == 1000
+
+
+def test_dollars_decimal_one_digit():
+    assert parse_dollars_cents("$0.5") == 50
+
+
+# ---------------------------------------------------------------------------
+# parse_when (relative + natural)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_when_relative_minutes():
+    dt = parse_when("30m")
+    assert dt is not None
+    assert dt.tzinfo is not None
+
+
+def test_parse_when_relative_hours():
+    dt = parse_when("2h")
+    assert dt is not None
+
+
+def test_parse_when_in_minutes():
+    assert parse_when("in 30 minutes") is not None
+
+
+def test_parse_when_tomorrow():
+    assert parse_when("tomorrow") is not None
+
+
+def test_parse_when_tomorrow_at():
+    dt = parse_when("tomorrow at 9am")
+    assert dt is not None
+    assert dt.hour == 9
+
+
+def test_parse_when_friday():
+    assert parse_when("friday") is not None
+
+
+def test_parse_when_garbage():
+    assert parse_when("blah blah") is None
+
+
+def test_parse_when_empty():
+    assert parse_when("") is None
+
+
+# ---------------------------------------------------------------------------
+# split_when_phrase
+# ---------------------------------------------------------------------------
+
+
+def test_split_when_in_form():
+    assert split_when_phrase("buy milk in 2h") == ("buy milk", "2h")
+
+
+def test_split_when_in_minutes():
+    assert split_when_phrase("call mom in 30 minutes") == ("call mom", "30 minutes")
+
+
+def test_split_when_tomorrow():
+    note, when = split_when_phrase("call mom tomorrow at 9am")
+    assert note == "call mom"
+    assert "tomorrow" in when
+
+
+def test_split_when_no_when_returns_none():
+    assert split_when_phrase("just a regular note") is None
+
+
+def test_split_when_friday():
+    note, when = split_when_phrase("pay rent friday")
+    assert note == "pay rent"
+    assert "friday" in when
+
+
+def test_split_when_strips_trailing_comma():
+    note, _ = split_when_phrase("buy milk, in 2h")
+    assert note == "buy milk"
+
+
+def test_split_when_empty():
+    assert split_when_phrase("") is None
+
+
+def test_split_when_in_alone_no_match():
+    """``in`` without a parseable phrase after it is not a valid split."""
+    assert split_when_phrase("believe in yourself") is None
