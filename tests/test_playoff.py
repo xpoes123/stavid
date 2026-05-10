@@ -523,3 +523,151 @@ async def test_weekly_review_per_user_independent(db_session):
     )
     assert david_row.review_text == "david's"
     assert steph_row.review_text == "steph's"
+
+
+# ---------------------------------------------------------------------------
+# UserPreference: merge_user_pillars / merge_user_checkin_hour
+# ---------------------------------------------------------------------------
+
+from src.cogs.playoff import (  # noqa: E402
+    DEFAULT_CHECKIN_HOUR,
+    get_default_pillars,
+    get_user_checkin_hour,
+    get_user_pillars,
+    load_user_preference,
+    merge_user_checkin_hour,
+    merge_user_pillars,
+)
+from src.db import UserPreference  # noqa: E402
+
+
+def test_merge_pillars_no_pref_returns_defaults():
+    assert merge_user_pillars(None, DAVID_ID) == get_default_pillars(DAVID_ID)
+    assert merge_user_pillars(None, STEPH_ID) == get_default_pillars(STEPH_ID)
+
+
+def test_merge_pillars_partial_override():
+    """A pref that only sets pillar2 should keep defaults for 1 and 3."""
+    pref = UserPreference(
+        guild_id=GUILD_ID, user_id=DAVID_ID,
+        pillar1=None, pillar2="Read for 30 minutes", pillar3=None,
+    )
+    pillars = merge_user_pillars(pref, DAVID_ID)
+    defaults = get_default_pillars(DAVID_ID)
+    assert pillars[0] == defaults[0]
+    assert pillars[1] == "Read for 30 minutes"
+    assert pillars[2] == defaults[2]
+
+
+def test_merge_pillars_full_override():
+    pref = UserPreference(
+        guild_id=GUILD_ID, user_id=STEPH_ID,
+        pillar1="A", pillar2="B", pillar3="C",
+    )
+    assert merge_user_pillars(pref, STEPH_ID) == ["A", "B", "C"]
+
+
+def test_merge_pillars_empty_string_treated_as_none():
+    """An empty-string pillar is treated as 'not set' (falls back to default)."""
+    pref = UserPreference(
+        guild_id=GUILD_ID, user_id=DAVID_ID,
+        pillar1="", pillar2="custom 2", pillar3="",
+    )
+    pillars = merge_user_pillars(pref, DAVID_ID)
+    defaults = get_default_pillars(DAVID_ID)
+    assert pillars[0] == defaults[0]
+    assert pillars[1] == "custom 2"
+    assert pillars[2] == defaults[2]
+
+
+def test_merge_checkin_hour_no_pref_returns_default():
+    assert merge_user_checkin_hour(None) == DEFAULT_CHECKIN_HOUR
+
+
+def test_merge_checkin_hour_explicit_zero():
+    """Hour 0 (midnight) is a valid override and must NOT be confused with NULL."""
+    pref = UserPreference(guild_id=GUILD_ID, user_id=DAVID_ID, checkin_hour=0)
+    assert merge_user_checkin_hour(pref) == 0
+
+
+def test_merge_checkin_hour_null_falls_back_to_default():
+    pref = UserPreference(guild_id=GUILD_ID, user_id=DAVID_ID, checkin_hour=None)
+    assert merge_user_checkin_hour(pref) == DEFAULT_CHECKIN_HOUR
+
+
+def test_merge_checkin_hour_custom():
+    pref = UserPreference(guild_id=GUILD_ID, user_id=STEPH_ID, checkin_hour=18)
+    assert merge_user_checkin_hour(pref) == 18
+
+
+# ---------------------------------------------------------------------------
+# UserPreference: DB persistence + async loaders
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_user_preference_returns_none_when_missing(db_session):
+    pref = await load_user_preference(db_session, GUILD_ID, DAVID_ID)
+    assert pref is None
+
+
+@pytest.mark.asyncio
+async def test_load_user_preference_filters_by_user(db_session):
+    """Loading David's pref must not return Stephanie's row."""
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        UserPreference(
+            guild_id=GUILD_ID, user_id=STEPH_ID,
+            pillar1="steph custom 1", checkin_hour=20,
+            created_at=now, updated_at=now,
+        )
+    )
+    await db_session.commit()
+    david_pref = await load_user_preference(db_session, GUILD_ID, DAVID_ID)
+    assert david_pref is None
+
+
+@pytest.mark.asyncio
+async def test_get_user_pillars_with_db_overrides(db_session):
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        UserPreference(
+            guild_id=GUILD_ID, user_id=DAVID_ID,
+            pillar1=None, pillar2="custom 2", pillar3=None,
+            created_at=now, updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    pillars = await get_user_pillars(db_session, GUILD_ID, DAVID_ID)
+    defaults = get_default_pillars(DAVID_ID)
+    assert pillars[0] == defaults[0]
+    assert pillars[1] == "custom 2"
+    assert pillars[2] == defaults[2]
+
+
+@pytest.mark.asyncio
+async def test_get_user_pillars_no_pref_returns_defaults(db_session):
+    pillars = await get_user_pillars(db_session, GUILD_ID, DAVID_ID)
+    assert pillars == get_default_pillars(DAVID_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_user_checkin_hour_with_override(db_session):
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        UserPreference(
+            guild_id=GUILD_ID, user_id=STEPH_ID,
+            checkin_hour=8, created_at=now, updated_at=now,
+        )
+    )
+    await db_session.commit()
+    assert await get_user_checkin_hour(db_session, GUILD_ID, STEPH_ID) == 8
+
+
+@pytest.mark.asyncio
+async def test_get_user_checkin_hour_default_when_absent(db_session):
+    assert (
+        await get_user_checkin_hour(db_session, GUILD_ID, DAVID_ID)
+        == DEFAULT_CHECKIN_HOUR
+    )

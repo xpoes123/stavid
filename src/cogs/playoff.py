@@ -12,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import select
 
-from src.db import PlayoffCheckin, WeeklyReview
+from src.db import PlayoffCheckin, UserPreference, WeeklyReview
 from src.utils import DAVID_ID, STEPH_ID
 
 if t.TYPE_CHECKING:
@@ -37,14 +37,61 @@ DEFAULT_PILLARS = ["Pillar 1", "Pillar 2", "Pillar 3"]
 USER_NAMES = {DAVID_ID: "David", STEPH_ID: "Stephanie"}
 
 WIN_THRESHOLD = 4  # individual wins needed to win the week
+DEFAULT_CHECKIN_HOUR = 22  # 10pm ET when the user has no override
+MIN_CHECKIN_HOUR = 0
+MAX_CHECKIN_HOUR = 23
 
 
-def get_pillar_names(user_id: int) -> list[str]:
+def get_default_pillars(user_id: int) -> list[str]:
     if user_id == DAVID_ID:
         return DAVID_PILLARS
     if user_id == STEPH_ID:
         return STEPH_PILLARS
     return DEFAULT_PILLARS
+
+
+# Backwards-compatible alias — the old name is still used by tests and any
+# external imports. Returns the hardcoded default pillars (no DB lookup).
+get_pillar_names = get_default_pillars
+
+
+def merge_user_pillars(pref: UserPreference | None, user_id: int) -> list[str]:
+    """Apply non-NULL pillar overrides on top of the user's default pillars."""
+    base = get_default_pillars(user_id)
+    if pref is None:
+        return base
+    return [
+        pref.pillar1 or base[0],
+        pref.pillar2 or base[1],
+        pref.pillar3 or base[2],
+    ]
+
+
+def merge_user_checkin_hour(pref: UserPreference | None) -> int:
+    if pref is None or pref.checkin_hour is None:
+        return DEFAULT_CHECKIN_HOUR
+    return pref.checkin_hour
+
+
+async def load_user_preference(
+    session, guild_id: int, user_id: int
+) -> UserPreference | None:
+    return await session.scalar(
+        select(UserPreference).where(
+            UserPreference.guild_id == guild_id,
+            UserPreference.user_id == user_id,
+        )
+    )
+
+
+async def get_user_pillars(session, guild_id: int, user_id: int) -> list[str]:
+    pref = await load_user_preference(session, guild_id, user_id)
+    return merge_user_pillars(pref, user_id)
+
+
+async def get_user_checkin_hour(session, guild_id: int, user_id: int) -> int:
+    pref = await load_user_preference(session, guild_id, user_id)
+    return merge_user_checkin_hour(pref)
 
 
 def today_et() -> date:
@@ -147,9 +194,15 @@ def build_user_weekly_embed(
     user_id: int,
     checkins: list[PlayoffCheckin],
     week_start: date,
+    pillars: list[str] | None = None,
 ) -> discord.Embed:
-    """Build a per-user weekly review embed."""
-    pillars = get_pillar_names(user_id)
+    """Build a per-user weekly review embed.
+
+    Pass ``pillars`` to override the default pillar names (e.g. when the user
+    has set custom names via ``/set_pillar``).
+    """
+    if pillars is None:
+        pillars = get_default_pillars(user_id)
     wins, losses = tally_user_week(checkins)
     status = finalize_user_status(checkins)
     week_end = week_start + timedelta(days=6)
@@ -277,7 +330,9 @@ class CheckinModal(discord.ui.Modal, title="Daily Check-in"):
 class Playoff(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
-        self._pinged_dates: set[date] = set()
+        # Per-user pinged dates so each user can have their own check-in hour
+        # without re-pinging once they've already been hit today.
+        self._pinged_dates: dict[int, set[date]] = {}
         self._reviewed_dates: set[date] = set()
         self.daily_ping.start()
         self.sunday_review.start()
@@ -292,7 +347,11 @@ class Playoff(commands.Cog):
 
     @app_commands.command(name="checkin", description="Log your daily pillars")
     async def checkin(self, interaction: discord.Interaction) -> None:
-        modal = CheckinModal(get_pillar_names(interaction.user.id), self._process_checkin)
+        async with self.bot.db() as s:
+            pillars = await get_user_pillars(
+                s, interaction.guild_id or 0, interaction.user.id
+            )
+        modal = CheckinModal(pillars, self._process_checkin)
         await interaction.response.send_modal(modal)
 
     async def _process_checkin(
@@ -332,10 +391,10 @@ class Playoff(commands.Cog):
         week_start = week_start_for(today)
         user_id = interaction.user.id
         guild_id = interaction.guild_id or 0
-        pillar_names = get_pillar_names(user_id)
         won_today = pillar1 and pillar2 and pillar3
 
         async with self.bot.db() as s:
+            pillar_names = await get_user_pillars(s, guild_id, user_id)
             existing = await s.scalar(
                 select(PlayoffCheckin).where(
                     PlayoffCheckin.guild_id == guild_id,
@@ -576,18 +635,130 @@ class Playoff(commands.Cog):
         )
 
     # ------------------------------------------------------------------ #
+    # Preferences                                                          #
+    # ------------------------------------------------------------------ #
+
+    async def _upsert_preference(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        pillar_idx: int | None = None,
+        pillar_value: str | None = None,
+        checkin_hour: int | None = None,
+    ) -> None:
+        """Upsert a UserPreference row, applying the given override.
+
+        ``pillar_idx`` is 1-based (1, 2, or 3). Pass ``pillar_value=""`` to clear
+        the override and revert to the default. ``checkin_hour=-1`` clears the
+        hour override.
+        """
+        async with self.bot.db() as s:
+            pref = await load_user_preference(s, guild_id, user_id)
+            if pref is None:
+                pref = UserPreference(guild_id=guild_id, user_id=user_id)
+                s.add(pref)
+
+            if pillar_idx is not None:
+                value = pillar_value if pillar_value else None
+                if pillar_idx == 1:
+                    pref.pillar1 = value
+                elif pillar_idx == 2:
+                    pref.pillar2 = value
+                elif pillar_idx == 3:
+                    pref.pillar3 = value
+            if checkin_hour is not None:
+                pref.checkin_hour = None if checkin_hour < 0 else checkin_hour
+
+            pref.updated_at = datetime.now(timezone.utc)
+            await s.commit()
+
+    @app_commands.command(
+        name="set_pillar",
+        description="Set one of your check-in pillars (clear by passing empty name)",
+    )
+    @app_commands.describe(
+        number="Which pillar to set (1, 2, or 3)",
+        name="New pillar text — leave empty to revert to your default",
+    )
+    async def set_pillar(
+        self,
+        interaction: discord.Interaction,
+        number: app_commands.Range[int, 1, 3],
+        name: str = "",
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._upsert_preference(
+            interaction.guild_id or 0,
+            interaction.user.id,
+            pillar_idx=int(number),
+            pillar_value=name.strip(),
+        )
+        if name.strip():
+            msg = f"✅ Pillar {number} set to **{name.strip()}**."
+        else:
+            msg = f"✅ Pillar {number} reverted to your default."
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @app_commands.command(
+        name="set_checkin_time",
+        description="Set the hour (0–23 ET) when the bot pings you for daily check-in",
+    )
+    @app_commands.describe(
+        hour="Hour in America/New_York (0–23). Pass -1 to revert to the default (10pm).",
+    )
+    async def set_checkin_time(
+        self,
+        interaction: discord.Interaction,
+        hour: app_commands.Range[int, -1, 23],
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._upsert_preference(
+            interaction.guild_id or 0,
+            interaction.user.id,
+            checkin_hour=int(hour),
+        )
+        # Clear any cached "already pinged today" entry for this user so a
+        # newly-set earlier hour can fire today if it hasn't yet.
+        self._pinged_dates.pop(interaction.user.id, None)
+        if hour < 0:
+            msg = f"✅ Check-in hour reverted to default ({DEFAULT_CHECKIN_HOUR}:00 ET)."
+        else:
+            msg = f"✅ Check-in hour set to {int(hour):02d}:00 ET."
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @app_commands.command(
+        name="my_preferences",
+        description="Show your custom pillars and check-in hour",
+    )
+    async def my_preferences(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        async with self.bot.db() as s:
+            pref = await load_user_preference(
+                s, interaction.guild_id or 0, interaction.user.id
+            )
+        pillars = merge_user_pillars(pref, interaction.user.id)
+        hour = merge_user_checkin_hour(pref)
+        defaults = get_default_pillars(interaction.user.id)
+
+        lines = [f"**Check-in time:** {hour:02d}:00 ET"]
+        if pref is None or pref.checkin_hour is None:
+            lines[0] += " _(default)_"
+        for i, (custom, default) in enumerate(zip(pillars, defaults), start=1):
+            tag = "" if custom == default else " _(custom)_"
+            lines.append(f"**Pillar {i}:** {custom}{tag}")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    # ------------------------------------------------------------------ #
     # Background tasks                                                     #
     # ------------------------------------------------------------------ #
 
     @tasks.loop(hours=1)
     async def daily_ping(self) -> None:
-        """At 10 pm ET, remind users who haven't checked in yet."""
+        """Each hour, remind any user whose configured check-in hour matches now."""
         now_et = datetime.now(ET)
         today = now_et.date()
-
-        if now_et.hour != 22 or today in self._pinged_dates:
-            return
-        self._pinged_dates.add(today)
 
         channel_id = os.getenv("CHECKIN_CHANNEL_ID")
         if not channel_id or not channel_id.isdigit():
@@ -595,21 +766,32 @@ class Playoff(commands.Cog):
         channel = self.bot.get_channel(int(channel_id))
         if channel is None:
             return
+        guild_id = channel.guild.id if channel.guild else 0
 
         for user_id in (DAVID_ID, STEPH_ID):
+            already_pinged = today in self._pinged_dates.get(user_id, set())
+            if already_pinged:
+                continue
+
             async with self.bot.db() as s:
+                pref = await load_user_preference(s, guild_id, user_id)
+                hour = merge_user_checkin_hour(pref)
+                if now_et.hour != hour:
+                    continue
+                pillars = merge_user_pillars(pref, user_id)
                 already = await s.scalar(
                     select(PlayoffCheckin).where(
                         PlayoffCheckin.user_id == user_id,
                         PlayoffCheckin.checkin_date == today,
                     )
                 )
+
+            self._pinged_dates.setdefault(user_id, set()).add(today)
+
             if already:
                 continue
 
-            pillar_list = "\n".join(
-                f"{i + 1}. {p}" for i, p in enumerate(get_pillar_names(user_id))
-            )
+            pillar_list = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(pillars))
             member = channel.guild.get_member(user_id)
             mention = member.mention if member else f"<@{user_id}>"
             await channel.send(
@@ -655,13 +837,18 @@ class Playoff(commands.Cog):
                     )
                 ).all()
             )
+            user_pillars: dict[int, list[str]] = {}
+            for uid in (DAVID_ID, STEPH_ID):
+                user_pillars[uid] = await get_user_pillars(s, guild_id, uid)
 
         by_user: dict[int, list[PlayoffCheckin]] = {}
         for r in rows:
             by_user.setdefault(r.user_id, []).append(r)
 
         for uid in (DAVID_ID, STEPH_ID):
-            embed = build_user_weekly_embed(uid, by_user.get(uid, []), prev_week_start)
+            embed = build_user_weekly_embed(
+                uid, by_user.get(uid, []), prev_week_start, pillars=user_pillars.get(uid)
+            )
             await channel.send(embed=embed)
 
     @sunday_review.before_loop

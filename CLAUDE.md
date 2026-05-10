@@ -137,6 +137,7 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | Playoff Week — individual scoring, daily check-ins, weekly review | Done |
 | Channel-as-inbox routing | Done |
 | Sage HTTP API | Done |
+| User preferences (custom pillars + check-in hour) | Done — `/set_pillar`, `/set_checkin_time`, `/my_preferences` |
 | Chore system (templates + instances + reminders) | Planned |
 | Date night history surface | Planned |
 

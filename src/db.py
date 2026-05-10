@@ -241,6 +241,36 @@ class WeeklyReview(Base):
     )
 
 
+class UserPreference(Base):
+    """Per-user playoff preferences: custom pillar names and check-in hour.
+
+    All columns are nullable so a row can carry partial overrides — any field
+    left NULL falls back to the hardcoded default for that user.
+    """
+
+    __tablename__ = "user_preferences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    pillar1: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pillar2: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pillar3: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Hour of day in America/New_York (0–23) when this user wants their
+    # daily check-in reminder. NULL = use system default (22 / 10pm).
+    checkin_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class SupplyItem(Base):
     """A household supply item that appears on the weekly checklist."""
 
