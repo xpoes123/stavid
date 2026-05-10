@@ -138,7 +138,7 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | Channel-as-inbox routing | Done |
 | Sage HTTP API | Done |
 | Chore system (templates + instances + reminders) | Planned |
-| Date night history surface | Planned |
+| Date night history & stats | Done — `/datenight history`, `/datenight stats`, `/datenight wishlist` |
 
 ## Active Design Docs
 - [00_overview.md](00_overview.md) — Playoff Week concept and user profiles
