@@ -32,19 +32,43 @@ def _fmt_dt(dt: datetime) -> str:
 
 
 def _parse_user_datetime(date_str: str, time_str: str) -> datetime | None:
-    """Parse user-supplied date + time strings into a UTC datetime, or None."""
+    """Parse user-supplied date + time strings into a UTC datetime, or None.
+
+    ``date_str`` accepts ``YYYY-MM-DD``, ``MM/DD/YYYY``, or ``MM/DD`` (the
+    last form rolls to the next occurrence: today's year if still in the
+    future this year, else next year).
+    """
     date_str = (date_str or "").strip()
     time_str = (time_str or "").strip() or "09:00"
     if not date_str:
         return None
 
-    for date_fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d"):
+    d = None
+    for date_fmt in ("%Y-%m-%d", "%m/%d/%Y"):
         try:
             d = datetime.strptime(date_str, date_fmt).date()
             break
         except ValueError:
             continue
-    else:
+
+    # Bare MM/DD: parse month/day and roll to the next future occurrence.
+    # Avoids strptime's deprecation warning about year-less dates.
+    if d is None and "/" in date_str and date_str.count("/") == 1:
+        try:
+            month_s, day_s = date_str.split("/")
+            month, day = int(month_s), int(day_s)
+            today = datetime.now(timezone.utc).date()
+            try:
+                candidate = today.replace(month=month, day=day)
+            except ValueError:
+                return None
+            if candidate < today:
+                candidate = candidate.replace(year=candidate.year + 1)
+            d = candidate
+        except (ValueError, TypeError):
+            d = None
+
+    if d is None:
         return None
 
     for time_fmt in ("%H:%M", "%I:%M%p", "%I%p", "%H:%M:%S"):
