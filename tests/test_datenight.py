@@ -336,3 +336,122 @@ def test_days_until_years_for_anniversary():
     birth_year = 2019
     years = next_date.year - birth_year
     assert years == 7
+
+
+# ---------------------------------------------------------------------------
+# compute_history_stats — pure aggregate logic
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date  # noqa: E402
+
+from src.cogs.datenight import compute_history_stats  # noqa: E402
+
+
+def _log(date, planner, rating=None, place="", notes=""):
+    """Build a DateNightLog with sensible defaults for stats tests."""
+    return DateNightLog(
+        guild_id=GUILD_ID,
+        planned_by=planner,
+        date=date,
+        place=place,
+        notes=notes,
+        rating=rating,
+    )
+
+
+def test_stats_empty_rows():
+    s = compute_history_stats([], today=_date(2026, 5, 10))
+    assert s["total"] == 0
+    assert s["by_planner"] == {}
+    assert s["avg_rating"] is None
+    assert s["rated_count"] == 0
+    assert s["days_since_last"] is None
+    assert s["longest_gap_days"] is None
+    assert s["first_date"] is None
+    assert s["last_date"] is None
+    assert s["top_rated"] == []
+
+
+def test_stats_total_and_by_planner():
+    rows = [
+        _log(_date(2026, 4, 1), DAVID_ID),
+        _log(_date(2026, 4, 8), STEPH_ID),
+        _log(_date(2026, 4, 15), DAVID_ID),
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert s["total"] == 3
+    assert s["by_planner"] == {DAVID_ID: 2, STEPH_ID: 1}
+
+
+def test_stats_avg_rating_excludes_unrated():
+    rows = [
+        _log(_date(2026, 4, 1), DAVID_ID, rating=5),
+        _log(_date(2026, 4, 8), STEPH_ID, rating=3),
+        _log(_date(2026, 4, 15), DAVID_ID),  # unrated
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert s["rated_count"] == 2
+    assert s["avg_rating"] == 4.0
+
+
+def test_stats_days_since_last():
+    rows = [
+        _log(_date(2026, 4, 1), DAVID_ID),
+        _log(_date(2026, 4, 30), STEPH_ID),
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert s["days_since_last"] == 10
+    assert s["last_date"] == _date(2026, 4, 30)
+    assert s["first_date"] == _date(2026, 4, 1)
+
+
+def test_stats_longest_gap():
+    rows = [
+        _log(_date(2026, 4, 1), DAVID_ID),
+        _log(_date(2026, 4, 8), STEPH_ID),    # gap of 7
+        _log(_date(2026, 4, 30), DAVID_ID),   # gap of 22 — longest
+        _log(_date(2026, 5, 5), STEPH_ID),    # gap of 5
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert s["longest_gap_days"] == 22
+
+
+def test_stats_longest_gap_single_entry_is_zero():
+    rows = [_log(_date(2026, 4, 1), DAVID_ID)]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    # No gaps to measure with one row — longest_gap_days is 0
+    assert s["longest_gap_days"] == 0
+
+
+def test_stats_top_rated_orders_highest_first():
+    rows = [
+        _log(_date(2026, 4, 1), DAVID_ID, rating=3),
+        _log(_date(2026, 4, 8), STEPH_ID, rating=5, place="A"),
+        _log(_date(2026, 4, 15), DAVID_ID, rating=5, place="B"),  # newer 5 — should beat A
+        _log(_date(2026, 4, 22), STEPH_ID, rating=4),
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    top = s["top_rated"]
+    assert len(top) == 3
+    assert top[0].rating == 5
+    assert top[0].place == "B"  # newer 5 first
+    assert top[1].place == "A"
+    assert top[2].rating == 4
+
+
+def test_stats_top_rated_capped_at_three():
+    rows = [_log(_date(2026, 4, i + 1), DAVID_ID, rating=5) for i in range(10)]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert len(s["top_rated"]) == 3
+
+
+def test_stats_rows_unordered_input():
+    """Stats must be order-independent — caller may pass rows in any order."""
+    rows = [
+        _log(_date(2026, 4, 30), STEPH_ID),
+        _log(_date(2026, 4, 1), DAVID_ID),
+        _log(_date(2026, 4, 8), STEPH_ID),
+    ]
+    s = compute_history_stats(rows, today=_date(2026, 5, 10))
+    assert s["first_date"] == _date(2026, 4, 1)
+    assert s["last_date"] == _date(2026, 4, 30)

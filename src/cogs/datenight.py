@@ -23,6 +23,65 @@ _STARS = {1: "★☆☆☆☆", 2: "★★☆☆☆", 3: "★★★☆☆", 4: "
 
 
 # ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+def compute_history_stats(rows: list[DateNightLog], today: _dt.date | None = None) -> dict:
+    """Aggregate stats from a list of ``DateNightLog`` rows.
+
+    ``today`` is injectable so tests don't depend on the wall clock. Returns
+    a dict with the keys: ``total``, ``by_planner`` (planner_id → count),
+    ``avg_rating``, ``rated_count``, ``days_since_last``, ``longest_gap_days``,
+    ``first_date``, ``last_date``, ``top_rated`` (list of (rating, row) tuples,
+    up to 3 entries).
+    """
+    today = today or _dt.date.today()
+    if not rows:
+        return {
+            "total": 0,
+            "by_planner": {},
+            "avg_rating": None,
+            "rated_count": 0,
+            "days_since_last": None,
+            "longest_gap_days": None,
+            "first_date": None,
+            "last_date": None,
+            "top_rated": [],
+        }
+
+    by_planner: dict[int, int] = {}
+    rated: list[int] = []
+    rated_rows: list[DateNightLog] = []
+    for r in rows:
+        by_planner[r.planned_by] = by_planner.get(r.planned_by, 0) + 1
+        if r.rating is not None:
+            rated.append(r.rating)
+            rated_rows.append(r)
+
+    dates_sorted = sorted(r.date for r in rows)
+    avg_rating = sum(rated) / len(rated) if rated else None
+    days_since_last = (today - dates_sorted[-1]).days
+
+    longest_gap = 0
+    for i in range(1, len(dates_sorted)):
+        longest_gap = max(longest_gap, (dates_sorted[i] - dates_sorted[i - 1]).days)
+
+    top_rated = sorted(rated_rows, key=lambda r: (-r.rating, -r.date.toordinal()))[:3]
+
+    return {
+        "total": len(rows),
+        "by_planner": by_planner,
+        "avg_rating": avg_rating,
+        "rated_count": len(rated),
+        "days_since_last": days_since_last,
+        "longest_gap_days": longest_gap,
+        "first_date": dates_sorted[0],
+        "last_date": dates_sorted[-1],
+        "top_rated": top_rated,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -229,27 +288,59 @@ class DateNight(commands.Cog):
             f"🔄 Swapped! It's now <@{next_id}>'s turn to plan the next date night."
         )
 
-    @datenight.command(name="history", description="Show the last 10 date nights")
-    async def dn_history(self, interaction: discord.Interaction) -> None:
+    @datenight.command(name="history", description="Show recent date nights, optionally filtered by planner")
+    @app_commands.describe(
+        count="How many to show (1–50, default 10)",
+        planner="Only show nights planned by this person",
+    )
+    async def dn_history(
+        self,
+        interaction: discord.Interaction,
+        count: app_commands.Range[int, 1, 50] = 10,
+        planner: discord.Member | None = None,
+    ) -> None:
         guild_id = interaction.guild_id or 0
         async with self.bot.db() as s:
-            rows = (
-                await s.scalars(
-                    select(DateNightLog)
-                    .where(DateNightLog.guild_id == guild_id)
-                    .order_by(DateNightLog.date.desc())
-                    .limit(10)
-                )
-            ).all()
+            stmt = (
+                select(DateNightLog)
+                .where(DateNightLog.guild_id == guild_id)
+                .order_by(DateNightLog.date.desc())
+            )
+            if planner is not None:
+                stmt = stmt.where(DateNightLog.planned_by == planner.id)
+            rows = (await s.scalars(stmt.limit(int(count)))).all()
 
         if not rows:
+            who = f" planned by {planner.mention}" if planner else ""
             await interaction.response.send_message(
-                "No date nights logged yet. Use `/datenight log` to add your first one!"
+                f"No date nights{who} logged yet. Use `/datenight log` to add one!"
             )
             return
 
-        embed = discord.Embed(title="💑 Date Night History", color=discord.Color.from_str("#ff69b4"))
-        for entry in rows:
+        rows_list = list(rows)
+        stats = compute_history_stats(rows_list)
+
+        embed = discord.Embed(
+            title="💑 Date Night History",
+            color=discord.Color.from_str("#ff69b4"),
+        )
+
+        header_lines = [f"Showing **{len(rows_list)}** night{'s' if len(rows_list) != 1 else ''}"]
+        if planner is not None:
+            header_lines[0] += f" planned by {planner.mention}"
+        if stats["avg_rating"] is not None:
+            header_lines.append(
+                f"Avg rating: **{stats['avg_rating']:.1f}** "
+                f"(of {stats['rated_count']} rated)"
+            )
+        if stats["last_date"] is not None and stats["days_since_last"] is not None:
+            header_lines.append(
+                f"Most recent: **{stats['last_date']}** "
+                f"({stats['days_since_last']} day{'s' if stats['days_since_last'] != 1 else ''} ago)"
+            )
+        embed.description = "\n".join(header_lines)
+
+        for entry in rows_list:
             title = str(entry.date)
             if entry.place:
                 title += f" — {entry.place}"
@@ -262,23 +353,91 @@ class DateNight(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    # -----------------------------------------------------------------------
-    # /wish group — wishlist
-    # -----------------------------------------------------------------------
-    wish = app_commands.Group(name="wish", description="Date night wishlist")
-
-    @wish.command(name="add", description="Add a place or activity to the date night wishlist")
-    @app_commands.describe(name="Where do you want to go or what do you want to do?")
-    async def wish_add(self, interaction: discord.Interaction, name: str) -> None:
+    @datenight.command(name="stats", description="Aggregate stats across all logged date nights")
+    async def dn_stats(self, interaction: discord.Interaction) -> None:
         guild_id = interaction.guild_id or 0
         async with self.bot.db() as s:
-            item = DateNightWishlist(guild_id=guild_id, name=name, added_by=interaction.user.id)
-            s.add(item)
-            await s.commit()
-        await interaction.response.send_message(f"✨ **{name}** added to the wishlist!")
+            rows = list(
+                (
+                    await s.scalars(
+                        select(DateNightLog)
+                        .where(DateNightLog.guild_id == guild_id)
+                        .order_by(DateNightLog.date)
+                    )
+                ).all()
+            )
 
-    @wish.command(name="list", description="Show the date night wishlist")
-    async def wish_list(self, interaction: discord.Interaction) -> None:
+        if not rows:
+            await interaction.response.send_message(
+                "No date nights logged yet. Use `/datenight log` to add your first one!"
+            )
+            return
+
+        stats = compute_history_stats(rows)
+        embed = discord.Embed(
+            title="📊 Date Night Stats",
+            color=discord.Color.from_str("#ff69b4"),
+        )
+
+        embed.add_field(
+            name="Total",
+            value=f"**{stats['total']}** date nights logged",
+            inline=False,
+        )
+
+        by_planner = stats["by_planner"]
+        if by_planner:
+            ordered = []
+            for uid in (DAVID_ID, STEPH_ID):
+                if uid in by_planner:
+                    ordered.append((uid, by_planner[uid]))
+            for uid, c in by_planner.items():
+                if uid not in (DAVID_ID, STEPH_ID):
+                    ordered.append((uid, c))
+            lines = [f"<@{uid}>: **{c}**" for uid, c in ordered]
+            embed.add_field(name="By Planner", value="\n".join(lines), inline=True)
+
+        if stats["avg_rating"] is not None:
+            embed.add_field(
+                name="Avg Rating",
+                value=f"**{stats['avg_rating']:.2f}** (of {stats['rated_count']} rated)",
+                inline=True,
+            )
+
+        cadence_parts: list[str] = []
+        if stats["days_since_last"] is not None:
+            cadence_parts.append(
+                f"**{stats['days_since_last']}** days since last"
+            )
+        if stats["longest_gap_days"] is not None and stats["total"] > 1:
+            cadence_parts.append(
+                f"Longest gap: **{stats['longest_gap_days']}** days"
+            )
+        if stats["first_date"] is not None:
+            cadence_parts.append(f"First logged: **{stats['first_date']}**")
+        if cadence_parts:
+            embed.add_field(name="Cadence", value="\n".join(cadence_parts), inline=False)
+
+        if stats["top_rated"]:
+            lines = []
+            for r in stats["top_rated"]:
+                bits = [f"**{r.date}**"]
+                if r.place:
+                    bits.append(r.place)
+                bits.append(_STARS[r.rating])
+                lines.append(" — ".join(bits))
+            embed.add_field(name="🏆 Top-Rated", value="\n".join(lines), inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    @datenight.command(
+        name="wishlist",
+        description="Show the date night wishlist (alias for /wish list)",
+    )
+    async def dn_wishlist(self, interaction: discord.Interaction) -> None:
+        await self._send_wishlist(interaction)
+
+    async def _send_wishlist(self, interaction: discord.Interaction) -> None:
         guild_id = interaction.guild_id or 0
         async with self.bot.db() as s:
             rows = (
@@ -325,6 +484,25 @@ class DateNight(commands.Cog):
             embed.add_field(name=f"Done ({len(visited)})", value="\n".join(lines), inline=False)
 
         await interaction.response.send_message(embed=embed)
+
+    # -----------------------------------------------------------------------
+    # /wish group — wishlist
+    # -----------------------------------------------------------------------
+    wish = app_commands.Group(name="wish", description="Date night wishlist")
+
+    @wish.command(name="add", description="Add a place or activity to the date night wishlist")
+    @app_commands.describe(name="Where do you want to go or what do you want to do?")
+    async def wish_add(self, interaction: discord.Interaction, name: str) -> None:
+        guild_id = interaction.guild_id or 0
+        async with self.bot.db() as s:
+            item = DateNightWishlist(guild_id=guild_id, name=name, added_by=interaction.user.id)
+            s.add(item)
+            await s.commit()
+        await interaction.response.send_message(f"✨ **{name}** added to the wishlist!")
+
+    @wish.command(name="list", description="Show the date night wishlist")
+    async def wish_list(self, interaction: discord.Interaction) -> None:
+        await self._send_wishlist(interaction)
 
     @wish.command(name="visit", description="Mark a wishlist item as visited")
     @app_commands.describe(item="Item to mark as visited", notes="Notes or memories from the visit")
