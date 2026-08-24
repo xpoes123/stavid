@@ -15,7 +15,10 @@ from src.utils import DAVID_ID, STEPH_ID, resolve_partner
 if t.TYPE_CHECKING:
     from src.main import StavidBot
 
-MONTHLY_RENT = 230000
+# Steph pays the full rent; David owes her his share = total - Steph's share.
+RENT_TOTAL_CENTS = 333792
+STEPH_RENT_SHARE_CENTS = 90000
+DAVID_RENT_SHARE_CENTS = RENT_TOTAL_CENTS - STEPH_RENT_SHARE_CENTS  # 243792
 
 
 class PartnerResolutionError(Exception):
@@ -164,13 +167,14 @@ class Budget(commands.Cog):
     )
     async def rent(self, interaction: discord.Interaction):
         partner = await resolve_partner(interaction)
+        # Either way the result is: David owes Steph his rent share (she fronts rent).
         if interaction.user.id == DAVID_ID:
             net_cents = await self._create_ledger_entry(
-                interaction, MONTHLY_RENT // 3, "rent"
+                interaction, -DAVID_RENT_SHARE_CENTS, "rent"
             )
         elif interaction.user.id == STEPH_ID:
             net_cents = await self._create_ledger_entry(
-                interaction, -(MONTHLY_RENT // 3), "rent"
+                interaction, DAVID_RENT_SHARE_CENTS, "rent"
             )
         else:
             await interaction.response.send_message(
