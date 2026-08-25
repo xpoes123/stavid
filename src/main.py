@@ -81,12 +81,31 @@ async def main() -> None:
         api_task = asyncio.create_task(server.serve())
         logging.info("Stavid API listening on %s:%d", api_host, api_port)
 
+    # Budget Game dashboard (finance.djiang.xyz). Public Basic-auth surface —
+    # point Caddy's vhost at FINANCE_PORT. Skipped if no FINANCE_PASSWORD.
+    dash_task = None
+    if os.getenv("FINANCE_PASSWORD"):
+        import uvicorn
+
+        from src.game.dashboard import create_dashboard_app
+
+        dash_host = os.getenv("FINANCE_HOST", "127.0.0.1")
+        dash_port = int(os.getenv("FINANCE_PORT", "7781"))
+        dash_app = create_dashboard_app(SessionLocal, guild_id=TEST_GUILD_ID)
+        dash_server = uvicorn.Server(uvicorn.Config(
+            dash_app, host=dash_host, port=dash_port,
+            log_level="warning", access_log=False))
+        dash_task = asyncio.create_task(dash_server.serve())
+        logging.info("Budget Game dashboard listening on %s:%d", dash_host, dash_port)
+
     try:
         async with bot:
             await bot.start(token)
     finally:
         if api_task is not None:
             api_task.cancel()
+        if dash_task is not None:
+            dash_task.cancel()
 
 
 if __name__ == "__main__":
