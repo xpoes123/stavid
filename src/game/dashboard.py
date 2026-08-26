@@ -2,22 +2,20 @@
 
 Reuses the same HTML the design preview used (`dashboard.html`); this module
 just computes the DATA dict from `game_txns`/`game_players` and injects it.
-Basic-auth (FINANCE_PASSWORD) — this is the one public surface, unlike the
-Bearer-only Sage API. Point Caddy's finance.djiang.xyz vhost at its port.
+Public (no auth) for now — point Caddy's finance.djiang.xyz vhost at its port.
+ponytail: no auth by request; add HTTPBasic/FINANCE_PASSWORD back if it ever
+needs to be private.
 """
 from __future__ import annotations
 
 import calendar
 import datetime as dt
 import json
-import os
-import secrets
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import select
 
 from src.db import GameAccount, GamePlayer, GameTxn
@@ -71,16 +69,9 @@ def render(data: dict) -> str:
 
 def create_dashboard_app(sessionmaker, guild_id: int) -> FastAPI:
     app = FastAPI(title="Budget Game")
-    security = HTTPBasic()
-    password = os.getenv("FINANCE_PASSWORD", "")
-
-    def auth(creds: HTTPBasicCredentials = Depends(security)) -> None:
-        ok = password and secrets.compare_digest(creds.password, password)
-        if not ok:
-            raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
 
     @app.get("/", response_class=HTMLResponse)
-    async def dashboard(_: None = Depends(auth)) -> str:
+    async def dashboard() -> str:
         today = dt.datetime.now(ET).date()
         async with sessionmaker() as s:
             player = (await s.scalars(select(GamePlayer).where(

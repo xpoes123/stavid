@@ -81,10 +81,10 @@ async def main() -> None:
         api_task = asyncio.create_task(server.serve())
         logging.info("Stavid API listening on %s:%d", api_host, api_port)
 
-    # Budget Game dashboard (finance.djiang.xyz). Public Basic-auth surface —
-    # point Caddy's vhost at FINANCE_PORT. Skipped if no FINANCE_PASSWORD.
+    # Budget Game dashboard (finance.djiang.xyz). Public, no auth for now —
+    # point Caddy's vhost at FINANCE_PORT. Set FINANCE_DASHBOARD=0 to disable.
     dash_task = None
-    if os.getenv("FINANCE_PASSWORD"):
+    if os.getenv("FINANCE_DASHBOARD", "1") != "0":
         import uvicorn
 
         from src.game.dashboard import create_dashboard_app
