@@ -473,6 +473,73 @@ class ShoppingItem(Base):
 # -----------------------------------------------------------------------------
 # Engine / Session
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Budget Game (card-agnostic variable-spend streak; per-user)
+# -----------------------------------------------------------------------------
+class GamePlayer(Base):
+    """One player's config + streak state. access_url holds SimpleFIN creds —
+    sensitive, never log it."""
+    __tablename__ = "game_players"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    monthly_cap_cents: Mapped[int] = mapped_column(Integer, default=120000, nullable=False)
+    streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    freezes_remaining: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    freeze_month: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_scored: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_brief_date: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    access_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class GameAccount(Base):
+    """A SimpleFIN account connected to a player. Card-agnostic: cards come and
+    go (churning) — deactivate rather than delete to keep txn history sane."""
+    __tablename__ = "game_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    simplefin_id: Mapped[str] = mapped_column(Text, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    kind: Mapped[str] = mapped_column(Text, default="card", nullable=False)  # card|checking
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class GameTxn(Base):
+    """Cached, classified transaction. Deduped by simplefin_id; pendings update
+    in place. confidence is 0..100 (int — no floats in the DB)."""
+    __tablename__ = "game_txns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    simplefin_id: Mapped[str] = mapped_column(Text, unique=True, index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    posted_date: Mapped[_dt.date] = mapped_column(Date, index=True, nullable=False)
+    cents: Mapped[int] = mapped_column(Integer, nullable=False)          # signed
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    money_type: Mapped[str] = mapped_column(Text, default="Variable", nullable=False)
+    category: Mapped[str] = mapped_column(Text, default="Other", nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class GameRule(Base):
+    """Learned merchant -> (category, money_type). Makes a merchant deterministic
+    thereafter (§6). user_id scopes rules per person."""
+    __tablename__ = "game_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    merchant_key: Mapped[str] = mapped_column(Text, index=True, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    money_type: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 def create_sessionmaker(echo: bool = False) -> async_sessionmaker:
     raw_url = _get_db_url()
     # Remove libpq SSL params for asyncpg, but still *use* them to decide TLS
