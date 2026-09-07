@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from src.db import GameAccount, GamePlayer, GameTxn
@@ -69,6 +70,7 @@ def render(data: dict) -> str:
 
 def create_dashboard_app(sessionmaker, guild_id: int) -> FastAPI:
     app = FastAPI(title="Budget Game")
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard() -> str:
