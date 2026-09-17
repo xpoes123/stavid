@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import typing as t
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -19,6 +18,9 @@ if t.TYPE_CHECKING:
 RENT_TOTAL_CENTS = 333792
 STEPH_RENT_SHARE_CENTS = 90000
 DAVID_RENT_SHARE_CENTS = RENT_TOTAL_CENTS - STEPH_RENT_SHARE_CENTS  # 243792
+
+# Note written by /paid; the ledger lists only activity after the latest one.
+SETTLE_NOTE = "settled up"
 
 
 class PartnerResolutionError(Exception):
@@ -163,6 +165,47 @@ class Budget(commands.Cog):
         ]
 
     @app_commands.command(
+        name="paid",
+        description="Settle up — clears the full running balance to zero",
+    )
+    async def paid(self, interaction: discord.Interaction):
+        partner = await resolve_partner(interaction)
+        if not partner:
+            await interaction.response.send_message(
+                "❌ I couldn’t infer who to settle with (set `PARTNER_IDS`).",
+                ephemeral=True,
+            )
+            return
+        async with self.bot.db() as s:
+            net = await _net_between(s, partner.id, interaction)
+            if net == 0:
+                await interaction.response.send_message(
+                    "✅ Already all square — nothing to settle."
+                )
+                return
+            # Post one balancing entry so net → 0. net > 0 means partner owes
+            # me (they pay me back); net < 0 means I owe them (I pay).
+            if net > 0:
+                creditor, debtor = partner.id, interaction.user.id
+            else:
+                creditor, debtor = interaction.user.id, partner.id
+            s.add(
+                LedgerEntry(
+                    guild_id=interaction.guild_id or 0,
+                    creditor_id=creditor,
+                    debtor_id=debtor,
+                    amount_cents=abs(net),
+                    note=SETTLE_NOTE,
+                )
+            )
+            await s.commit()
+            new_net = await _net_between(s, partner.id, interaction)
+        await interaction.response.send_message(
+            f"🧹 **Settled up with {partner.mention}** — cleared {_format_money(abs(net))}.\n"
+            f"{_format_net_message(new_net)}"
+        )
+
+    @app_commands.command(
         name="rent", description="Run once a month to add rent payment"
     )
     async def rent(self, interaction: discord.Interaction):
@@ -220,11 +263,15 @@ class Budget(commands.Cog):
                 f"{entry.created_at:%m/%d} • {interaction.user.mention} {direction} {partner.mention} | {_format_money(entry.amount_cents)} - {entry.note}"
             )
         embed = discord.Embed(
-            title=f"📒 Ledger with {partner.display_name} (this month)",
+            title=f"📒 Ledger with {partner.display_name} (since last settle-up)",
             description="\n".join(entry_lines),  # cap if you want
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Net", value=_format_net_message(net_cents), inline=False)
+        embed.add_field(
+            name="Net (running total — /paid to clear)",
+            value=_format_net_message(net_cents),
+            inline=False,
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
         async def _format_entry_line(
@@ -240,22 +287,21 @@ async def _get_ledger_itemized(
 ) -> list[LedgerEntry]:
     guild_id = interaction.guild_id
     me_id = interaction.user.id
-    start = datetime.datetime.now(datetime.timezone.utc).replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0
+    pair = (
+        (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id)
+        | (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id)
     )
-    q = (
-        select(LedgerEntry)
-        .where(
-            LedgerEntry.guild_id == guild_id,
-            LedgerEntry.created_at >= start,
-            (
-                (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id)
-                | (LedgerEntry.creditor_id == partner_id) & (LedgerEntry.debtor_id == me_id)
-            ),
+    # Show only activity since the last /paid so the list reconciles with Net
+    # (everything before a settle-up nets to zero anyway).
+    last_settle = await s.scalar(
+        select(func.max(LedgerEntry.created_at)).where(
+            LedgerEntry.guild_id == guild_id, pair, LedgerEntry.note == SETTLE_NOTE
         )
-        .order_by(LedgerEntry.created_at.desc())
-        .limit(100)
     )
+    q = select(LedgerEntry).where(LedgerEntry.guild_id == guild_id, pair)
+    if last_settle is not None:
+        q = q.where(LedgerEntry.created_at > last_settle)
+    q = q.order_by(LedgerEntry.created_at.desc()).limit(100)
     return (await s.scalars(q)).all()
 
 
@@ -274,6 +320,9 @@ async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> 
         else_=0,
     )
 
+    # ponytail: all-time running balance (the `settled` column was dropped in
+    # migration 1aa83cc20783). /paid posts a balancing entry to reset it to 0;
+    # reintroduce a settled flag only if you need per-entry settlement history.
     q = select(func.coalesce(func.sum(expr), 0)).where(LedgerEntry.guild_id == guild_id)
 
     res = await s.execute(q)
