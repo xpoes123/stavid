@@ -202,43 +202,6 @@ class ChoreInstance(Base):
     )
 
 
-class SupplyItem(Base):
-    """A household supply item that appears on the weekly checklist."""
-
-    __tablename__ = "supply_items"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # Date this supply was most recently restocked. Updated when a shopping
-    # item with a matching name is marked bought (via /shopping remove or
-    # the Sage API). NULL = never bought (or pre-existing rows).
-    last_bought_at: Mapped[_dt.date | None] = mapped_column(Date, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
-class SupplyCheckResult(Base):
-    """Records which items were flagged as needing restock for a given week."""
-
-    __tablename__ = "supply_check_results"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    week_of: Mapped[_dt.date] = mapped_column(Date, nullable=False)
-    item_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
 class DateNightPlanner(Base):
     """One row per guild — tracks who planned the last date night (next is their partner)."""
 

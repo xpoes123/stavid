@@ -16,9 +16,8 @@ Named "Stavid" (Stephanie + David).
 
 Stavid runs on the Hetzner VPS at `87.99.136.82` under `/opt/stavid` as a
 systemd service named `stavid`. There is no Heroku, no `Procfile`, no
-release phase. **Deploys are manual** (Sentinel is decommissioned — see
-`~/code/CLAUDE.md`): merge the PR, then SSH to the VPS and pull + restart
-yourself.
+release phase. **Claude deploys directly** (see `~/code/CLAUDE.md` banner): merge the PR,
+then SSH to the VPS and pull + restart — no need to stop and ask.
 
 Deploy / inspection from the VPS shell:
 
@@ -32,8 +31,8 @@ venv/bin/alembic upgrade head
 
 Migrations are auto-applied on every systemd restart via a drop-in
 override at `deploy/stavid.service.d/30-alembic.conf` — it adds an
-`ExecStartPre=alembic upgrade head` so a Sentinel auto-deploy of a
-PR with a new migration applies cleanly without anyone SSHing in.
+`ExecStartPre=alembic upgrade head` so a deploy of a PR with a new
+migration applies cleanly.
 
 If the upgrade fails the bot won't start — check `journalctl -u
 stavid` and run `alembic` by hand to diagnose. One-time install on
@@ -62,7 +61,6 @@ src/
     datenight.py    — Date night logging
     outings.py      — Outings/activity wishlist with weighted roulette
     shopping.py     — Shopping list with Amazon OG scraping
-    supplies.py     — Household supplies tracking
     watchlist.py    — Watchlist (movies/shows)
     chores.py       — Recurring chore templates + instances + materialize loop
     inbox/          — Channel-as-inbox routing (one cog per channel)
