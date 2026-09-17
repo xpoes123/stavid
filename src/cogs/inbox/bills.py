@@ -28,16 +28,14 @@ CHANNEL = "bills"
 log = logging.getLogger(__name__)
 
 # Leading direction phrases that flip the default creditor/debtor roles.
-# Default: author = creditor (partner owes author).
-# Flip:    author = debtor  (author owes partner) — set when the author is
-#          recording a payment they made or a debt they themselves carry.
+# Default: author = creditor (partner owes author). This also covers "I paid
+# / I gave" — a payment CREDITS the payer (like /pay), reducing their balance.
+# Flip:    author = debtor (author owes partner) — ONLY when the author states
+#          they carry the debt ("I owe ..."). Do NOT flip on "I paid": that was
+#          the reversal bug that kept doubling debts instead of clearing them.
 _FLIP_PATTERNS = [
-    re.compile(r"^\s*i\s+paid\b", re.IGNORECASE),
     re.compile(r"^\s*i\s+owe\b", re.IGNORECASE),
-    re.compile(r"^\s*i\s+gave\b", re.IGNORECASE),
-    re.compile(r"^\s*paid\s+\S+", re.IGNORECASE),
     re.compile(r"^\s*owe\s+\S+", re.IGNORECASE),
-    re.compile(r"^\s*gave\s+\S+", re.IGNORECASE),
 ]
 
 

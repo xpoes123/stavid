@@ -156,28 +156,31 @@ def test_split_when_in_alone_no_match():
 @pytest.mark.parametrize(
     "msg",
     [
-        "I paid stephanie 95.4",
-        "i paid steph 30 for dinner",
+        # ONLY "I owe / owe X" flips: the author states they carry the debt.
         "I owe steph 50",
         "i owe david 15 for the bill",
-        "I gave david 25 for groceries",
-        "i gave steph 12.5",
-        "paid stephanie 30",
-        "paid david 100 — rent share",
         "owe stephanie 20",
         "owe david 75",
-        "gave steph 12.5",
-        "gave david 60 split",
     ],
 )
 def test_bills_flip_when_author_is_debtor(msg):
-    """Leading 'I paid/I owe/I gave/paid X/owe X/gave X' should flip direction."""
+    """Leading 'I owe / owe X' should flip direction (author = debtor)."""
     assert author_is_debtor(msg) is True
 
 
 @pytest.mark.parametrize(
     "msg",
     [
+        # Payments credit the author (like /pay) — these must NOT flip.
+        "I paid stephanie 95.4",
+        "i paid steph 30 for dinner",
+        "I gave david 25 for groceries",
+        "i gave steph 12.5",
+        "paid stephanie 30",
+        "paid david 100 — rent share",
+        "gave steph 12.5",
+        "gave david 60 split",
+        # Plain charges — author is creditor.
         "$95.40 flowers",
         "stephanie owes me 95.4",
         "Stephanie owes me 30",
@@ -196,15 +199,18 @@ def test_bills_default_when_author_is_creditor(msg):
 
 
 def test_bills_flip_case_insensitive():
-    assert author_is_debtor("I PAID stephanie 95.4") is True
+    assert author_is_debtor("I OWE stephanie 95.4") is True
     assert author_is_debtor("Owe Stephanie 30") is True
 
 
-def test_bills_flip_requires_target_after_paid():
-    """Bare 'paid' or 'owe' with nothing after is not a flip — too ambiguous."""
-    assert author_is_debtor("paid") is False
+def test_bills_paid_does_not_flip():
+    """Regression: 'I paid ...' must credit the payer, not add to their debt."""
+    assert author_is_debtor("I paid stephanie 2182.94") is False
+
+
+def test_bills_flip_requires_target_after_owe():
+    """Bare 'owe' with nothing after is not a flip — too ambiguous."""
     assert author_is_debtor("owe") is False
-    assert author_is_debtor("gave") is False
 
 
 def test_bills_flip_only_at_message_start():
