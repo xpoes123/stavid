@@ -157,12 +157,23 @@ class Budget(commands.Cog):
             else ("you owe them" if net_cents < 0 else "zip")
         )
         suggested_amount = abs(Decimal(net_cents) / Decimal(100))
-        return [
+        choices = []
+        # Echo whatever the user is typing so custom amounts are one click away.
+        try:
+            typed = float(current)
+            if typed > 0:
+                choices.append(
+                    app_commands.Choice(name=f"${typed:.2f}", value=typed)
+                )
+        except ValueError:
+            pass
+        choices.append(
             app_commands.Choice(
-                name=f"${suggested_amount:.2f} ({label_sign})",
+                name=f"${suggested_amount:.2f} (settle all — {label_sign})",
                 value=float(suggested_amount),
-            ),
-        ]
+            )
+        )
+        return choices
 
     @app_commands.command(
         name="paid",
