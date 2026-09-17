@@ -22,6 +22,9 @@ DAVID_RENT_SHARE_CENTS = RENT_TOTAL_CENTS - STEPH_RENT_SHARE_CENTS  # 243792
 # Note written by /paid; the ledger lists only activity after the latest one.
 SETTLE_NOTE = "settled up"
 
+# Steph's share of the monthly wifi bill (David pays it, she owes this back).
+WIFI_SHARE_CENTS = 3000
+
 
 class PartnerResolutionError(Exception):
     """Raised by _create_ledger_entry when the partner cannot be resolved."""
@@ -245,9 +248,9 @@ class Budget(commands.Cog):
     async def wifi_bill(self, interaction: discord.Interaction):
         partner = await resolve_partner(interaction)
         if interaction.user.id == DAVID_ID:
-            net_cents = await self._create_ledger_entry(interaction, 8000 // 3, "wifi")
+            net_cents = await self._create_ledger_entry(interaction, WIFI_SHARE_CENTS, "wifi")
         elif interaction.user.id == STEPH_ID:
-            net_cents = await self._create_ledger_entry(interaction, -(8000 // 3), "wifi")
+            net_cents = await self._create_ledger_entry(interaction, -WIFI_SHARE_CENTS, "wifi")
         else:
             await interaction.response.send_message(
                 "This command is only available to David and Steph.", ephemeral=True
