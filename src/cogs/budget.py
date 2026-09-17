@@ -191,31 +191,18 @@ class Budget(commands.Cog):
             )
             return
         async with self.bot.db() as s:
-            net = await _net_between(s, partner.id, interaction)
-            if net == 0:
+            cleared = await settle_up(
+                s, interaction.guild_id or 0, interaction.user.id, partner.id
+            )
+            if cleared == 0:
                 await interaction.response.send_message(
                     "✅ Already all square — nothing to settle."
                 )
                 return
-            # Post one balancing entry so net → 0. net > 0 means partner owes
-            # me (they pay me back); net < 0 means I owe them (I pay).
-            if net > 0:
-                creditor, debtor = partner.id, interaction.user.id
-            else:
-                creditor, debtor = interaction.user.id, partner.id
-            s.add(
-                LedgerEntry(
-                    guild_id=interaction.guild_id or 0,
-                    creditor_id=creditor,
-                    debtor_id=debtor,
-                    amount_cents=abs(net),
-                    note=SETTLE_NOTE,
-                )
-            )
             await s.commit()
             new_net = await _net_between(s, partner.id, interaction)
         await interaction.response.send_message(
-            f"🧹 **Settled up with {partner.mention}** — cleared {_format_money(abs(net))}.\n"
+            f"🧹 **Settled up with {partner.mention}** — cleared {_format_money(cleared)}.\n"
             f"{_format_net_message(new_net)}"
         )
 
@@ -333,8 +320,12 @@ async def _get_ledger_itemized(
 
 
 async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> int:
-    guild_id = interaction.guild_id
-    me_id = interaction.user.id
+    return await net_between_ids(
+        s, interaction.guild_id, interaction.user.id, partner_id
+    )
+
+
+async def net_between_ids(s, guild_id: int, me_id: int, partner_id: int) -> int:
     expr = case(
         (
             (LedgerEntry.creditor_id == me_id) & (LedgerEntry.debtor_id == partner_id),
@@ -354,6 +345,32 @@ async def _net_between(s, partner_id: int, interaction: discord.Interaction) -> 
 
     res = await s.execute(q)
     return int(res.scalar_one())
+
+
+async def settle_up(s, guild_id: int, me_id: int, partner_id: int) -> int:
+    """Post a balancing entry so the running net between the two → 0.
+
+    Returns the cleared amount in cents (0 if already square — nothing added).
+    Does NOT commit; the caller owns the transaction. The balancing entry
+    carries SETTLE_NOTE, which also collapses the `/ledger` view.
+    """
+    net = await net_between_ids(s, guild_id, me_id, partner_id)
+    if net == 0:
+        return 0
+    if net > 0:  # partner owes me → they pay me back
+        creditor, debtor = partner_id, me_id
+    else:  # I owe them → I pay
+        creditor, debtor = me_id, partner_id
+    s.add(
+        LedgerEntry(
+            guild_id=guild_id,
+            creditor_id=creditor,
+            debtor_id=debtor,
+            amount_cents=abs(net),
+            note=SETTLE_NOTE,
+        )
+    )
+    return abs(net)
 
 
 async def setup(bot: commands.Bot) -> None:

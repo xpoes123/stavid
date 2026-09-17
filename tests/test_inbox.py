@@ -213,6 +213,45 @@ def test_bills_flip_requires_target_after_owe():
     assert author_is_debtor("owe") is False
 
 
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "I settled up",
+        "settled up",
+        "i settle up",
+        "settle up",
+        "I paid all",
+        "paid everything",
+        "I paid it all",
+        "i paid it off",
+        "paid in full",
+        "all square",
+        "we're even",
+        "were square",
+    ],
+)
+def test_bills_settle_phrases(msg):
+    from src.cogs.inbox.bills import is_settle_phrase
+
+    assert is_settle_phrase(msg) is True
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "I paid stephanie 95.4",   # a specific payment, not a full settle
+        "stephanie owes me 30",
+        "$25 dinner",
+        "I owe steph 50",
+        "paid stephanie 30",
+    ],
+)
+def test_bills_not_settle_phrases(msg):
+    from src.cogs.inbox.bills import is_settle_phrase
+
+    assert is_settle_phrase(msg) is False
+
+
 def test_bills_flip_only_at_message_start():
     """A flip phrase later in the message must not flip direction."""
     assert author_is_debtor("dinner — I paid for it last time") is False
