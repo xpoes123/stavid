@@ -74,9 +74,21 @@ class Budget(commands.Cog):
                     note=note,
                 )
             )
-            await s.commit()
-
+            await s.flush()
             net = await _net_between(s, partner.id, interaction)
+            # If this entry cleared the balance (e.g. /pay of the full amount),
+            # drop a settle marker so /ledger collapses — same as #bills.
+            if net == 0:
+                s.add(
+                    LedgerEntry(
+                        guild_id=interaction.guild_id or 0,
+                        creditor_id=interaction.user.id,
+                        debtor_id=partner.id,
+                        amount_cents=0,
+                        note=SETTLE_NOTE,
+                    )
+                )
+            await s.commit()
         return net
 
     @app_commands.command(
@@ -287,13 +299,6 @@ class Budget(commands.Cog):
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        async def _format_entry_line(
-            self, me_id: int, partner_id: int, e: LedgerEntry
-        ) -> str:
-            direction = "→" if e.creditor_id == me_id else "←"
-            who = "You" if e.creditor_id == me_id else "Partner"
-            return f"{e.created_at:%Y-%m-%d} • {who} {direction} {_format_money(e.amount_cents)}"
 
 
 async def _get_ledger_itemized(
