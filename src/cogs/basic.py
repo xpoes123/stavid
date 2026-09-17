@@ -13,8 +13,6 @@ if t.TYPE_CHECKING:
 
 # ---------- Static help page content ----------
 
-# ---------- Static help page content ----------
-
 
 def basic_help_embed() -> discord.Embed:
     e = discord.Embed(
