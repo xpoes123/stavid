@@ -146,43 +146,6 @@ class ReminderEntry(Base):
     done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
-class PlayoffCheckin(Base):
-    __tablename__ = "playoff_checkins"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    checkin_date: Mapped[_dt.date] = mapped_column(Date, nullable=False)
-    pillar1: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    pillar2: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    pillar3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
-class WeeklyReview(Base):
-    __tablename__ = "weekly_reviews"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    week_of: Mapped[_dt.date] = mapped_column(Date, nullable=False)
-    review_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
 class ChoreTemplate(Base):
     """A recurring chore template — produces ChoreInstance rows on a schedule.
 
@@ -233,36 +196,6 @@ class ChoreInstance(Base):
     )
     completed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
-class UserPreference(Base):
-    """Per-user playoff preferences: custom pillar names and check-in hour.
-
-    All columns are nullable so a row can carry partial overrides — any field
-    left NULL falls back to the hardcoded default for that user.
-    """
-
-    __tablename__ = "user_preferences"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    guild_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    pillar1: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pillar2: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pillar3: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Hour of day in America/New_York (0–23) when this user wants their
-    # daily check-in reminder. NULL = use system default (22 / 10pm).
-    checkin_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,

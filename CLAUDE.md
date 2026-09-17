@@ -16,12 +16,11 @@ Named "Stavid" (Stephanie + David).
 
 Stavid runs on the Hetzner VPS at `87.99.136.82` under `/opt/stavid` as a
 systemd service named `stavid`. There is no Heroku, no `Procfile`, no
-release phase. Deploys are autonomous: when a PR is merged on GitHub,
-[Sentinel](../sentinel/) (the engineering bot, also on the same VPS) clones
-the repo, copies files into `/opt/stavid` (preserving `.env` and `venv`),
-runs `pip install -e .`, smoke-tests imports, and `systemctl restart stavid`.
+release phase. **Deploys are manual** (Sentinel is decommissioned — see
+`~/code/CLAUDE.md`): merge the PR, then SSH to the VPS and pull + restart
+yourself.
 
-Manual deploys / inspection from the VPS shell:
+Deploy / inspection from the VPS shell:
 
 ```bash
 cd /opt/stavid
@@ -59,7 +58,6 @@ src/
     basic.py        — /help, /wifi
     budget.py       — /venmo, /pay, /rent, /wifi_bill, /ledger
     reminders.py    — /remind, /reminders, /remove_reminder, /reset_reminders + 60s firing loop
-    playoff.py      — Habit tracker: daily check-ins, individual W/L, weekly review
     bucket.py       — Bucket list tracking
     datenight.py    — Date night logging
     outings.py      — Outings/activity wishlist with weighted roulette
@@ -131,7 +129,6 @@ also updating Sage.
 | `STAVID_API_TOKEN` | Bearer token for the Sage API. If unset, the API is disabled. |
 | `STAVID_API_HOST` | Defaults to `127.0.0.1` — leave unless you know what you're doing |
 | `STAVID_API_PORT` | Defaults to `7780` |
-| `CHECKIN_CHANNEL_ID` | Channel for the playoff 10pm reminder + Sunday review |
 | `REMINDER_CHANNEL_ID` | Override for where `/remind` reminders fire (else looks up `#reminders` by name) |
 
 Copy `.env.example` to `.env` for local development. `.env.local` overrides `.env`.
@@ -147,14 +144,16 @@ Copy `.env.example` to `.env` for local development. `.env.local` overrides `.en
 | `/help`, `/wifi` | Done |
 | `/venmo`, `/pay`, `/rent`, `/wifi_bill`, `/ledger` | Done |
 | `/remind`, `/reminders`, `/remove_reminder`, `/reset_reminders` + firing loop | Done |
-| Playoff Week — individual scoring, daily check-ins, weekly review | Done |
 | Channel-as-inbox routing | Done |
 | Sage HTTP API | Done |
-| User preferences (custom pillars + check-in hour) | Done — `/set_pillar`, `/set_checkin_time`, `/my_preferences` |
 | Chore system (templates + instances + reminders) | Done — `/chore add`, `/chore template`, `/chore complete`, `/chores`, `/chore templates`, `/chore template_remove`. Wired up `#weekly-chores` and `#monthly-chores` inbox routing. |
 | Date night history & stats | Done — `/datenight history`, `/datenight stats`, `/datenight wishlist` |
 
 ## Active Design Docs
+> The Playoff Week / daily-goals feature was **removed** (2026-09-17) — it's
+> being reframed (shape TBD). The DB tables (`playoff_checkins`,
+> `weekly_reviews`, `user_preferences`) were left orphaned in case the reframe
+> reuses the data. The docs below describe the old design; kept for reference.
 - [00_overview.md](00_overview.md) — Playoff Week concept and user profiles
 - [01_win_conditions.md](01_win_conditions.md) — Per-person daily win pillars
 - [02_system_design.md](02_system_design.md) — Bot behavior spec for habit tracker
