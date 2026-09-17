@@ -57,11 +57,8 @@ src/
     basic.py        — /help, /wifi
     budget.py       — /venmo, /pay, /rent, /wifi_bill, /ledger
     reminders.py    — /remind, /reminders, /remove_reminder, /reset_reminders + 60s firing loop
-    bucket.py       — Bucket list tracking
     datenight.py    — Date night logging
-    outings.py      — Outings/activity wishlist with weighted roulette
     shopping.py     — Shopping list with Amazon OG scraping
-    watchlist.py    — Watchlist (movies/shows)
     chores.py       — Recurring chore templates + instances + materialize loop
     inbox/          — Channel-as-inbox routing (one cog per channel)
 migrations/
@@ -107,6 +104,11 @@ flow is one-directional — **Sage calls Stavid; Stavid never calls Sage**.
   - `GET /bucket`, `POST /bucket`
   - `GET /outings`, `POST /outings`
   - `GET /reminders`
+  <!-- NOTE: The Discord-facing watchlist/bucket/outings cogs + their inbox
+       channels were removed 2026-09-17 (bloat trim; slated for rework). The
+       API endpoints, ORM models, and DB tables are intentionally KEPT so Sage
+       keeps working and the rework has its data. Re-add cogs when reworking. -->
+
   - `GET /ledger`
   - `GET /summary` — aggregate digest for Sage's morning check-in
 
