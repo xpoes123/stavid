@@ -223,21 +223,27 @@ class Budget(commands.Cog):
         name="rent", description="Run once a month to add rent payment"
     )
     async def rent(self, interaction: discord.Interaction):
-        partner = await resolve_partner(interaction)
-        # Either way the result is: David owes Steph his rent share (she fronts rent).
-        if interaction.user.id == DAVID_ID:
-            net_cents = await self._create_ledger_entry(
-                interaction, -DAVID_RENT_SHARE_CENTS, "rent"
-            )
-        elif interaction.user.id == STEPH_ID:
-            net_cents = await self._create_ledger_entry(
-                interaction, DAVID_RENT_SHARE_CENTS, "rent"
-            )
-        else:
+        if interaction.user.id not in (DAVID_ID, STEPH_ID):
             await interaction.response.send_message(
                 "This command is only available to David and Steph.", ephemeral=True
             )
             return
+        partner = await resolve_partner(interaction)
+        # Always: David owes Steph his rent share (she fronts the full rent).
+        # Recorded with an explicit positive amount so it displays cleanly
+        # regardless of who runs the command.
+        async with self.bot.db() as s:
+            s.add(
+                LedgerEntry(
+                    guild_id=interaction.guild_id or 0,
+                    creditor_id=STEPH_ID,
+                    debtor_id=DAVID_ID,
+                    amount_cents=DAVID_RENT_SHARE_CENTS,
+                    note="rent",
+                )
+            )
+            await s.commit()
+            net_cents = await _net_between(s, partner.id, interaction)
         await interaction.response.send_message(
             f"📊 **Current Balance after rent {partner.mention}:**\n{_format_net_message(net_cents)}",
         )
