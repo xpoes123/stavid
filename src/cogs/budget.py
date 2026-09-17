@@ -267,11 +267,18 @@ class Budget(commands.Cog):
             entries: list[LedgerEntry] = await _get_ledger_itemized(
                 s, partner.id, interaction
             )
+        # Discord embed descriptions cap at 4096 chars; show newest 25 and note
+        # the rest (they shrink to nothing once /paid is run).
+        MAX_LINES = 25
         entry_lines = []
-        for entry in entries:
+        for entry in entries[:MAX_LINES]:
             direction = "←" if entry.creditor_id == interaction.user.id else "→"
             entry_lines.append(
                 f"{entry.created_at:%m/%d} • {interaction.user.mention} {direction} {partner.mention} | {_format_money(entry.amount_cents)} - {entry.note}"
+            )
+        if len(entries) > MAX_LINES:
+            entry_lines.append(
+                f"…and {len(entries) - MAX_LINES} older entries — run `/paid` to clear the balance."
             )
         embed = discord.Embed(
             title=f"📒 Ledger with {partner.display_name} (since last settle-up)",
