@@ -28,27 +28,55 @@ if t.TYPE_CHECKING:
 CHANNEL = "bills"
 log = logging.getLogger(__name__)
 
-# Leading direction phrases that flip the default creditor/debtor roles.
-# Default: author = creditor (partner owes author). This also covers "I paid
-# / I gave" — a payment CREDITS the payer (like /pay), reducing their balance.
-# Flip:    author = debtor (author owes partner) — ONLY when the author states
-#          they carry the debt ("I owe ..."). Do NOT flip on "I paid": that was
-#          the reversal bug that kept doubling debts instead of clearing them.
-_FLIP_PATTERNS = [
-    re.compile(r"^\s*i\s+owe\b", re.IGNORECASE),
-    re.compile(r"^\s*owe\s+\S+", re.IGNORECASE),
-]
+# Direction parsing. Default: author = creditor (partner owes author).
+# The message's leading subject + verb decides who carries the debt:
+#   subject owes ...          → subject is the debtor
+#   subject paid/gave/... ... → subject is the creditor (a payment credits the
+#                               payer, like /pay — never flip "I paid" to debt)
+# Subject is "I"/implicit (author), "you/she/he" (partner), or a first name
+# resolved to a user ID. Unknown subjects keep the default.
+_NAMES = {
+    "david": DAVID_ID, "dave": DAVID_ID,
+    "stephanie": STEPH_ID, "steph": STEPH_ID, "steph's": STEPH_ID,
+}
+_PARTNER_PRONOUNS = {"you", "u", "she", "he"}
+_PAY_VERBS = r"paid|pay|payed|gave|covered|bought|got|picked\s+up|fronted|spent"
+_DIRECTION_RE = re.compile(
+    rf"^\s*(?:(?P<subj>[a-z']+)\s+)?(?:(?P<owe>owes?\b)|(?P<pay>(?:{_PAY_VERBS})\b))",
+    re.IGNORECASE,
+)
 
 
-def author_is_debtor(content: str) -> bool:
-    """True when the message starts with a phrase that flips the ledger direction.
+def author_is_debtor(content: str, author_id: int | None = None) -> bool:
+    """True when the message says the author carries the debt.
 
-    See ``_FLIP_PATTERNS`` for the recognised forms.
+    Only the leading clause counts ("dinner — I owe you nothing" stays default).
+    ``author_id`` lets a first name that refers to the author ("david owes
+    stephanie 30" from David) count as first person.
     """
-    return any(p.match(content) for p in _FLIP_PATTERNS)
+    m = _DIRECTION_RE.match(content)
+    if not m:
+        return False
+    subj = (m.group("subj") or "i").lower()
+    if subj == "i":
+        author_is_subject = True
+    elif subj in _PARTNER_PRONOUNS:
+        author_is_subject = False
+    elif subj in _NAMES:
+        author_is_subject = author_id is not None and _NAMES[subj] == author_id
+    else:
+        return False  # "rent paid 1500", "netflix 15" etc. → default
+    if m.group("owe"):
+        # Bare "owe" with nothing after is too ambiguous to flip.
+        if not content[m.end():].strip():
+            return False
+        return author_is_subject
+    return not author_is_subject
 
 
 # Amount-free phrases that mean "clear the whole balance" (same as /paid).
+# A match only OFFERS a settle (confirm button) — it never wipes on its own,
+# since "settle up later?" or "we're even right?" match too.
 _SETTLE_PATTERNS = [
     re.compile(r"^\s*i?\s*settled?\s+up\b", re.IGNORECASE),
     re.compile(r"^\s*settle\s+up\b", re.IGNORECASE),
@@ -75,6 +103,65 @@ def _partner_id(creator_id: int) -> int:
     return other if other is not None else creator_id
 
 
+class SettleConfirmView(discord.ui.View):
+    """Confirm/Cancel buttons for a #bills settle-up. Either partner may click.
+
+    The balance is re-read at click time, so a charge added between the prompt
+    and the click is included (and shown) rather than silently dropped.
+    """
+
+    def __init__(self, bot: StavidBot, guild_id: int, me_id: int, partner_id: int) -> None:
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.me_id = me_id
+        self.partner_id = partner_id
+        self.done = False
+
+    async def _allowed(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id in (self.me_id, self.partner_id):
+            return True
+        await interaction.response.send_message(
+            "Only the two of you can settle this.", ephemeral=True
+        )
+        return False
+
+    async def do_confirm(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            return
+        if self.done:
+            await interaction.response.edit_message(content="Already handled.", view=None)
+            return
+        self.done = True
+        self.stop()
+        async with self.bot.db() as s:
+            cleared = await settle_up(s, self.guild_id, self.me_id, self.partner_id)
+            await s.commit()
+        text = (
+            f"🧹 Settled up — cleared {_format_money(cleared)}. All square."
+            if cleared
+            else "✅ Already all square."
+        )
+        await interaction.response.edit_message(content=text, view=None)
+
+    async def do_cancel(self, interaction: discord.Interaction) -> None:
+        if not await self._allowed(interaction):
+            return
+        self.done = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Settle cancelled — balance unchanged.", view=None
+        )
+
+    @discord.ui.button(label="Confirm settle", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.do_confirm(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.do_cancel(interaction)
+
+
 class BillsInbox(commands.Cog):
     def __init__(self, bot: StavidBot) -> None:
         self.bot = bot
@@ -90,20 +177,22 @@ class BillsInbox(commands.Cog):
 
             partner_id = _partner_id(message.author.id)
 
-            # "I settled up" / "I paid all" / "all square" → clear the balance.
+            # "I settled up" / "all square" → offer to clear the balance; the
+            # settle only happens when a partner clicks Confirm.
             if is_settle_phrase(content):
                 async with self.bot.db() as s:
-                    cleared = await settle_up(
+                    net = await net_between_ids(
                         s, message.guild.id, message.author.id, partner_id
                     )
-                    await s.commit()
-                await react_ok(message)
-                if cleared:
-                    await message.channel.send(
-                        f"🧹 Settled up — cleared {_format_money(cleared)}. All square."
-                    )
-                else:
+                if net == 0:
                     await message.channel.send("✅ Already all square.")
+                    return
+                await message.channel.send(
+                    f"Settle up and clear {_format_money(abs(net))}?",
+                    view=SettleConfirmView(
+                        self.bot, message.guild.id, message.author.id, partner_id
+                    ),
+                )
                 return
 
             amount_cents = parse_dollars_cents(content)
@@ -120,7 +209,7 @@ class BillsInbox(commands.Cog):
                     note_parts.append(f"(due {due_at.strftime('%Y-%m-%d')})")
 
             note = " ".join(note_parts)
-            if author_is_debtor(content):
+            if author_is_debtor(content, message.author.id):
                 creditor_id, debtor_id = partner_id, message.author.id
             else:
                 creditor_id, debtor_id = message.author.id, partner_id
