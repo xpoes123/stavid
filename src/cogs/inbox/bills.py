@@ -1,4 +1,4 @@
-"""#bills → LedgerEntry with the dollar amount + due date in the note."""
+"""#bills → a Piggy ledger entry with the dollar amount + due date in the note."""
 from __future__ import annotations
 
 import logging
@@ -18,8 +18,8 @@ from src.cogs.inbox._utils import (
     react_warn,
     split_when_phrase,
 )
-from src.cogs.budget import SETTLE_NOTE, _format_money, net_between_ids, settle_up
-from src.db import LedgerEntry
+from src import piggy
+from src.cogs.budget import _format_money
 from src.utils import DAVID_ID, STEPH_ID
 
 if t.TYPE_CHECKING:
@@ -113,7 +113,6 @@ class SettleConfirmView(discord.ui.View):
     def __init__(self, bot: StavidBot, guild_id: int, me_id: int, partner_id: int) -> None:
         super().__init__(timeout=600)
         self.bot = bot
-        self.guild_id = guild_id
         self.me_id = me_id
         self.partner_id = partner_id
         self.done = False
@@ -134,9 +133,7 @@ class SettleConfirmView(discord.ui.View):
             return
         self.done = True
         self.stop()
-        async with self.bot.db() as s:
-            cleared = await settle_up(s, self.guild_id, self.me_id, self.partner_id)
-            await s.commit()
+        cleared = await piggy.settle(self.me_id)
         text = (
             f"🧹 Settled up — cleared {_format_money(cleared)}. All square."
             if cleared
@@ -180,10 +177,7 @@ class BillsInbox(commands.Cog):
             # "I settled up" / "all square" → offer to clear the balance; the
             # settle only happens when a partner clicks Confirm.
             if is_settle_phrase(content):
-                async with self.bot.db() as s:
-                    net = await net_between_ids(
-                        s, message.guild.id, message.author.id, partner_id
-                    )
+                net = await piggy.balance(message.author.id)
                 if net == 0:
                     await message.channel.send("✅ Already all square.")
                     return
@@ -214,34 +208,9 @@ class BillsInbox(commands.Cog):
             else:
                 creditor_id, debtor_id = message.author.id, partner_id
 
-            cleared_to_zero = False
-            async with self.bot.db() as s:
-                s.add(
-                    LedgerEntry(
-                        guild_id=message.guild.id,
-                        creditor_id=creditor_id,
-                        debtor_id=debtor_id,
-                        amount_cents=amount_cents,
-                        note=note,
-                    )
-                )
-                await s.flush()
-                # If this entry cleared the balance (e.g. "I paid <full amount>"),
-                # drop a settle marker so the ledger view collapses.
-                if await net_between_ids(
-                    s, message.guild.id, message.author.id, partner_id
-                ) == 0:
-                    s.add(
-                        LedgerEntry(
-                            guild_id=message.guild.id,
-                            creditor_id=message.author.id,
-                            debtor_id=partner_id,
-                            amount_cents=0,
-                            note=SETTLE_NOTE,
-                        )
-                    )
-                    cleared_to_zero = True
-                await s.commit()
+            m = _DIRECTION_RE.match(content)
+            await piggy.add(creditor_id, amount_cents, note, payment=bool(m and m.group("pay")))
+            cleared_to_zero = await piggy.balance(message.author.id) == 0
             await react_ok(message)
             if cleared_to_zero:
                 await message.channel.send("🧹 That clears it — you're all square.")

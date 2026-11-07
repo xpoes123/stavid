@@ -7,25 +7,44 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.cogs.budget import net_between_ids
+from src import piggy
 from src.cogs.inbox._utils import APARTMENT_GUILD_ID
 from src.cogs.inbox.bills import BillsInbox, SettleConfirmView
-from src.db import Base, LedgerEntry
 from src.utils import DAVID_ID, STEPH_ID
 
 G = APARTMENT_GUILD_ID
 
 
+class FakePiggy:
+    """In-memory stand-in for src.piggy: a list of (creditor, debtor, cents)."""
+
+    def __init__(self):
+        self.rows: list[tuple[int, int, int]] = []
+
+    def _partner(self, me):
+        return STEPH_ID if me == DAVID_ID else DAVID_ID
+
+    async def add(self, creditor_id, cents, note, payment=False):
+        self.rows.append((creditor_id, self._partner(creditor_id), cents))
+
+    async def balance(self, me_id):
+        return sum(c if cr == me_id else -c for cr, _d, c in self.rows)
+
+    async def settle(self, me_id):
+        net = await self.balance(me_id)
+        if net:
+            self.rows.append((self._partner(me_id), me_id, net) if net > 0 else (me_id, self._partner(me_id), -net))
+        return abs(net)
+
+
 @pytest_asyncio.fixture
 async def bot(monkeypatch):
     monkeypatch.setenv("PARTNER_IDS", f"{DAVID_ID},{STEPH_ID}")
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield SimpleNamespace(db=async_sessionmaker(engine, expire_on_commit=False))
-    await engine.dispose()
+    fake = FakePiggy()
+    for name in ("add", "balance", "settle"):
+        monkeypatch.setattr(piggy, name, getattr(fake, name))
+    yield SimpleNamespace(piggy=fake)
 
 
 def _msg(content: str, author_id: int = DAVID_ID):
@@ -40,15 +59,11 @@ def _msg(content: str, author_id: int = DAVID_ID):
 
 
 async def _net(bot, me=DAVID_ID, partner=STEPH_ID) -> int:
-    async with bot.db() as s:
-        return await net_between_ids(s, G, me, partner)
+    return await bot.piggy.balance(me)
 
 
 async def _seed(bot, creditor: int, debtor: int, cents: int) -> None:
-    async with bot.db() as s:
-        s.add(LedgerEntry(guild_id=G, creditor_id=creditor, debtor_id=debtor,
-                          amount_cents=cents, note="seed"))
-        await s.commit()
+    bot.piggy.rows.append((creditor, debtor, cents))
 
 
 # ---------------------------------------------------------------------------
@@ -155,3 +170,20 @@ async def test_confirm_twice_only_settles_once(bot):
     await _seed(bot, DAVID_ID, STEPH_ID, 1000)  # new charge after the settle
     await view.do_confirm(_interaction(DAVID_ID))
     assert await _net(bot) == 1000
+
+
+async def test_piggy_client_settle_posts_balancing_payment(monkeypatch):
+    calls = []
+
+    async def fake_call(method, path, as_id, json=None):
+        calls.append((method, as_id, json))
+        return {"balance_cents": 5000, "entries": []}
+
+    monkeypatch.setattr(piggy, "_call", fake_call)
+    assert await piggy.settle(DAVID_ID) == 5000
+    assert calls[-1] == ("POST", DAVID_ID, {"amount_cents": 5000, "direction": "they_paid", "note": "settled up"})
+
+
+async def test_piggy_client_refuses_unknown_user():
+    with pytest.raises(piggy.PiggyError):
+        await piggy._call("GET", "/api/v1/ledger", 12345)
